@@ -5,7 +5,7 @@
 JacoSensorBoard board;
 
 // Use the standard SPI instance
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+RADIO_CLASS radio = RADIO_CLASS(new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI));
 
 WRAPPER_CLASS radio_driver(radio, board);
 
