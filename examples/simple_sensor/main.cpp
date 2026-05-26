@@ -9,8 +9,8 @@
 #define PIN_GPS_ENABLE 1
 #define ACTIVE_MODE_DURATION_MS 300000  // 5 minutes
 #define LISTEN_MODE_DURATION_MS 20000   // 20 seconds short listen
-#define DEEP_SLEEP_INTERVAL_SEC 3600    // 1 hour
 #define GPS_TIMEOUT_MS 600000          // 10 minutes
+#define GPS_STABILIZE_MS 10000         // 10 seconds stabilization after fix
 
 // Persistent state in RTC memory
 RTC_DATA_ATTR double last_known_lat = 0.0;
@@ -105,12 +105,22 @@ protected:
 
     extern uint32_t active_mode_end_ms;
     extern bool is_promoted_to_active;
+    extern bool is_gps_cycle_active;
+    extern uint32_t gps_start_ms;
 
     // Promote to full active mode if we receive authorized data
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     if (!is_promoted_to_active) {
       is_promoted_to_active = true;
       Serial.println("[PWR] Authorized peer activity detected. Promoted to ACTIVE mode (5m).");
+
+      // Start GPS cycle since we are now active and user wants location
+      if (!is_gps_cycle_active) {
+        is_gps_cycle_active = true;
+        gps_start_ms = millis();
+        digitalWrite(PIN_GPS_ENABLE, HIGH);
+        Serial.println("[PWR] Starting GPS cycle for authorized session.");
+      }
     }
   }
 };
@@ -123,6 +133,8 @@ uint32_t active_mode_end_ms = 0;
 bool is_promoted_to_active = false;
 bool is_gps_cycle_active = false;
 uint32_t gps_start_ms = 0;
+uint32_t gps_fix_acquired_ms = 0;
+bool is_gps_stabilizing = false;
 
 void setup() {
   Serial.begin(115200);
@@ -154,19 +166,22 @@ void setup() {
   sensors.querySensors(0xFF, dummy);
 
   if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
-    // Enter short LISTEN mode first
+    // Radio wakeup: Short listen mode, NO GPS
     active_mode_end_ms = millis() + LISTEN_MODE_DURATION_MS;
     is_promoted_to_active = false;
-    is_gps_cycle_active = false; // Don't start GPS report on random radio wakeup
-    Serial.println("[PWR] Woke up by Radio. Listening for 20s...");
+    is_gps_cycle_active = false;
+    digitalWrite(PIN_GPS_ENABLE, LOW);
+    Serial.println("[PWR] Woke up by Radio. Listening for 20s (GPS OFF).");
   } else {
-    // Normal periodic wake up: Enter full active mode and do GPS report
+    // Timer or Power-on: Full cycle, GPS ON
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     is_promoted_to_active = true;
     is_gps_cycle_active = true;
     gps_start_ms = millis();
+    gps_fix_acquired_ms = 0;
+    is_gps_stabilizing = false;
     digitalWrite(PIN_GPS_ENABLE, HIGH);
-    Serial.println("[PWR] Periodic wake up. Starting GPS reporting cycle.");
+    Serial.println("[PWR] Scheduled/Power-on wakeup. Starting GPS cycle.");
   }
 }
 
@@ -182,8 +197,14 @@ void loop() {
         the_mesh.handleCommand(0, command_buf, reply);
         if (reply[0]) Serial.println(reply);
         command_buf[0] = 0; clen = 0;
+
         active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
         is_promoted_to_active = true;
+        if (!is_gps_cycle_active) {
+          is_gps_cycle_active = true;
+          gps_start_ms = millis();
+          digitalWrite(PIN_GPS_ENABLE, HIGH);
+        }
       }
     } else {
       command_buf[clen++] = c;
@@ -198,37 +219,46 @@ void loop() {
   if (is_gps_cycle_active) {
     auto loc = sensors.getLocationProvider();
     if (loc && loc->isValid() && sensors.node_lat != 0.0) {
-      double current_lat = sensors.node_lat;
-      double current_lon = sensors.node_lon;
-      float current_alt = sensors.node_altitude;
-
-      double dist = 0;
-      if (has_any_gps_fix_ever) {
-        dist = calculateDistance(last_known_lat, last_known_lon, current_lat, current_lon);
+      if (!is_gps_stabilizing) {
+        is_gps_stabilizing = true;
+        gps_fix_acquired_ms = millis();
+        Serial.println("[GPS] Fix acquired. Stabilizing for 10s...");
       }
 
-      char msg[64];
-      snprintf(msg, sizeof(msg), "Pos:%.6f,%.6f Alt:%.1f Dist:%.1fm",
-               current_lat, current_lon, current_alt, dist);
+      if (millis() - gps_fix_acquired_ms > GPS_STABILIZE_MS) {
+        double current_lat = sensors.node_lat;
+        double current_lon = sensors.node_lon;
+        float current_alt = sensors.node_altitude;
 
-      the_mesh.sendChannelAlert(msg);
-      Serial.printf("[GPS] Fix acquired. Distance: %.1fm. Report sent.\n", dist);
+        double dist = 0;
+        if (has_any_gps_fix_ever) {
+          dist = calculateDistance(last_known_lat, last_known_lon, current_lat, current_lon);
+        }
 
-      last_known_lat = current_lat;
-      last_known_lon = current_lon;
-      last_known_alt = current_alt;
-      has_any_gps_fix_ever = true;
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Pos:%.6f,%.6f Alt:%.1f Dist:%.1fm",
+                 current_lat, current_lon, current_alt, dist);
 
-      is_gps_cycle_active = false;
-      digitalWrite(PIN_GPS_ENABLE, LOW);
+        the_mesh.sendChannelAlert(msg);
+        Serial.printf("[GPS] Report sent. Distance: %.1fm.\n", dist);
 
-      // If we are promoted, stay active. If not, sleep soon.
-      if (!is_promoted_to_active) {
-        active_mode_end_ms = millis() + 15000;
+        last_known_lat = current_lat;
+        last_known_lon = current_lon;
+        last_known_alt = current_alt;
+        has_any_gps_fix_ever = true;
+
+        is_gps_cycle_active = false;
+        is_gps_stabilizing = false;
+        digitalWrite(PIN_GPS_ENABLE, LOW);
+
+        if (!is_promoted_to_active) {
+          active_mode_end_ms = millis() + 15000;
+        }
       }
     } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
       Serial.println("[GPS] Timeout waiting for fix.");
       is_gps_cycle_active = false;
+      is_gps_stabilizing = false;
       digitalWrite(PIN_GPS_ENABLE, LOW);
       if (!is_promoted_to_active) {
         active_mode_end_ms = millis() + 5000;
@@ -239,11 +269,17 @@ void loop() {
   // Handle sleep transition
   if (!is_gps_cycle_active) {
     if (active_mode_end_ms != 0 && millis() > active_mode_end_ms) {
-      Serial.printf("[PWR] Entering Deep Sleep for %d seconds...\n", DEEP_SLEEP_INTERVAL_SEC);
+      uint32_t now_utc = rtc_clock.getCurrentTime();
+      uint32_t seconds_until_next_hour = 3600 - (now_utc % 3600);
+
+      // Safety: If RTC is not set correctly (e.g. still 2024), fallback to 1 hour
+      if (now_utc < 1704067200) seconds_until_next_hour = 3600;
+
+      Serial.printf("[PWR] Entering Deep Sleep. Next wake in %lu seconds (at top of hour).\n", seconds_until_next_hour);
       Serial.flush();
       delay(100);
       radio.getIrqFlags();
-      ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
+      ((JacoSensorBoard&)board).enterDeepSleep(seconds_until_next_hour);
     }
   }
 }
