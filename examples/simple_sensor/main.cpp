@@ -1,5 +1,6 @@
 #include "SensorMesh.h"
 #include <math.h>
+#include <stdarg.h>
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -27,6 +28,22 @@ double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
     double a = pow(sin(dLat / 2), 2) + pow(sin(dLon / 2), 2) * cos(lat1) * cos(lat2);
     double c = 2 * atan2(sqrt(a), sqrt(1 - a));
     return 6371000.0 * c;
+}
+
+// Global logger with timestamp
+void log_ts(const char* format, ...) {
+    char time_buf[16];
+    uint32_t now = rtc_clock.getCurrentTime();
+    DateTime dt(now);
+    snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d] ", dt.hour(), dt.minute(), dt.second());
+    Serial.print(time_buf);
+
+    char log_buf[192];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(log_buf, sizeof(log_buf), format, args);
+    va_end(args);
+    Serial.println(log_buf);
 }
 
 class MyMesh : public SensorMesh {
@@ -67,13 +84,16 @@ public:
     char ina_info[64] = {0};
     formatAllInaVoltages(ina_info, sizeof(ina_info));
 
-    int len = 5 + snprintf((char*)&data[5], sizeof(data) - 5, "%s: %s | %s",
-                            getNodeName(), text, ina_info);
+    float temp = getTemperature(TELEM_CHANNEL_SELF);
+    float hum = getRelativeHumidity(TELEM_CHANNEL_SELF);
+
+    int len = 5 + snprintf((char*)&data[5], sizeof(data) - 5, "%s: %s | %s | ATH:%.1fC/%.0f%%",
+                            getNodeName(), text, ina_info, temp, hum);
 
     auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
     if (pkt) {
       sendFlood(pkt);
-      Serial.println("[MESH] Alert sent to private channel.");
+      log_ts("[MESH] Alert sent to private channel.");
     }
   }
 
@@ -94,7 +114,9 @@ protected:
     if (strcmp(command, "status") == 0) {
       char ina_info[64] = {0};
       formatAllInaVoltages(ina_info, sizeof(ina_info));
-      sprintf(reply, "INA: %s, GPS: %.6f,%.6f", ina_info, last_known_lat, last_known_lon);
+      float temp = getTemperature(TELEM_CHANNEL_SELF);
+      float hum = getRelativeHumidity(TELEM_CHANNEL_SELF);
+      sprintf(reply, "INA:%s, ATH:%.1fC/%.0f%%, GPS:%.6f,%.6f", ina_info, temp, hum, last_known_lat, last_known_lon);
       return true;
     }
     return false;
@@ -108,18 +130,16 @@ protected:
     extern bool is_gps_cycle_active;
     extern uint32_t gps_start_ms;
 
-    // Promote to full active mode if we receive authorized data
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     if (!is_promoted_to_active) {
       is_promoted_to_active = true;
-      Serial.println("[PWR] Authorized peer activity detected. Promoted to ACTIVE mode (5m).");
+      log_ts("[PWR] Authorized peer activity detected. Promoted to ACTIVE mode (5m).");
 
-      // Start GPS cycle since we are now active and user wants location
       if (!is_gps_cycle_active) {
         is_gps_cycle_active = true;
         gps_start_ms = millis();
         digitalWrite(PIN_GPS_ENABLE, HIGH);
-        Serial.println("[PWR] Starting GPS cycle for authorized session.");
+        log_ts("[PWR] Starting GPS cycle for authorized session.");
       }
     }
   }
@@ -140,12 +160,12 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println("--- Jaco Sensor Starting ---");
+  log_ts("--- Jaco Sensor Starting ---");
 
   board.begin();
 
   if (!radio_init()) {
-    Serial.println("Radio init failed!");
+    log_ts("Radio init failed!");
     while(1);
   }
 
@@ -166,14 +186,12 @@ void setup() {
   sensors.querySensors(0xFF, dummy);
 
   if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
-    // Radio wakeup: Short listen mode, NO GPS
     active_mode_end_ms = millis() + LISTEN_MODE_DURATION_MS;
     is_promoted_to_active = false;
     is_gps_cycle_active = false;
     digitalWrite(PIN_GPS_ENABLE, LOW);
-    Serial.println("[PWR] Woke up by Radio. Listening for 20s (GPS OFF).");
+    log_ts("[PWR] Woke up by Radio. Listening for 20s (GPS OFF).");
   } else {
-    // Timer or Power-on: Full cycle, GPS ON
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     is_promoted_to_active = true;
     is_gps_cycle_active = true;
@@ -181,7 +199,7 @@ void setup() {
     gps_fix_acquired_ms = 0;
     is_gps_stabilizing = false;
     digitalWrite(PIN_GPS_ENABLE, HIGH);
-    Serial.println("[PWR] Scheduled/Power-on wakeup. Starting GPS cycle.");
+    log_ts("[PWR] Scheduled/Power-on wakeup. Starting GPS cycle.");
   }
 }
 
@@ -194,8 +212,9 @@ void loop() {
       if (clen > 0) {
         command_buf[clen] = 0;
         char reply[160] = {0};
+        log_ts("[CONSOLE] Executing: %s", command_buf);
         the_mesh.handleCommand(0, command_buf, reply);
-        if (reply[0]) Serial.println(reply);
+        if (reply[0]) log_ts(" -> %s", reply);
         command_buf[0] = 0; clen = 0;
 
         active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
@@ -222,7 +241,7 @@ void loop() {
       if (!is_gps_stabilizing) {
         is_gps_stabilizing = true;
         gps_fix_acquired_ms = millis();
-        Serial.println("[GPS] Fix acquired. Stabilizing for 10s...");
+        log_ts("[GPS] Fix acquired. Stabilizing for 10s...");
       }
 
       if (millis() - gps_fix_acquired_ms > GPS_STABILIZE_MS) {
@@ -240,7 +259,7 @@ void loop() {
                  current_lat, current_lon, current_alt, dist);
 
         the_mesh.sendChannelAlert(msg);
-        Serial.printf("[GPS] Report sent. Distance: %.1fm.\n", dist);
+        log_ts("[GPS] Report sent. Distance: %.1fm.", dist);
 
         last_known_lat = current_lat;
         last_known_lon = current_lon;
@@ -256,7 +275,7 @@ void loop() {
         }
       }
     } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
-      Serial.println("[GPS] Timeout waiting for fix.");
+      log_ts("[GPS] Timeout waiting for fix.");
       is_gps_cycle_active = false;
       is_gps_stabilizing = false;
       digitalWrite(PIN_GPS_ENABLE, LOW);
@@ -266,16 +285,13 @@ void loop() {
     }
   }
 
-  // Handle sleep transition
   if (!is_gps_cycle_active) {
     if (active_mode_end_ms != 0 && millis() > active_mode_end_ms) {
       uint32_t now_utc = rtc_clock.getCurrentTime();
       uint32_t seconds_until_next_hour = 3600 - (now_utc % 3600);
-
-      // Safety: If RTC is not set correctly (e.g. still 2024), fallback to 1 hour
       if (now_utc < 1704067200) seconds_until_next_hour = 3600;
 
-      Serial.printf("[PWR] Entering Deep Sleep. Next wake in %lu seconds (at top of hour).\n", seconds_until_next_hour);
+      log_ts("[PWR] Entering Deep Sleep. Next wake in %lu seconds.", seconds_until_next_hour);
       Serial.flush();
       delay(100);
       radio.getIrqFlags();
