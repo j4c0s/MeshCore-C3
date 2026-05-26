@@ -30,6 +30,14 @@ bool radio_init() {
 
   rtc_clock.begin(Wire);
 
+  // Check if DS3231 is actually found
+  Wire.beginTransmission(0x68);
+  if (Wire.endTransmission() == 0) {
+    Serial.println("RTC DS3231 found!");
+  } else {
+    Serial.println("RTC DS3231 NOT found at 0x68!");
+  }
+
   // Initialize GPS serial port
   #if ENV_INCLUDE_GPS
     #ifdef GPS_BAUD_RATE
