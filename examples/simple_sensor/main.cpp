@@ -8,6 +8,7 @@
 
 #define PIN_GPS_ENABLE 1
 #define ACTIVE_MODE_DURATION_MS 300000  // 5 minutes
+#define LISTEN_MODE_DURATION_MS 20000   // 20 seconds short listen
 #define DEEP_SLEEP_INTERVAL_SEC 3600    // 1 hour
 #define GPS_TIMEOUT_MS 600000          // 10 minutes
 
@@ -81,7 +82,6 @@ protected:
   TimeSeriesData battery_data;
 
   void onSensorDataRead() override {
-    // Record primary battery (assuming CH1 is primary or uses board.getBattMilliVolts())
     battery_data.recordData(getRTCClock(), (float)board.getBattMilliVolts() / 1000.0f);
   }
 
@@ -100,15 +100,18 @@ protected:
     return false;
   }
 
-  // Override to detect authorized logins and stay awake
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override {
     SensorMesh::onPeerDataRecv(packet, type, sender_idx, secret, data, len);
 
-    // If we received peer data, it means we are talking to someone in our ACL
-    // Extend active mode
     extern uint32_t active_mode_end_ms;
+    extern bool is_promoted_to_active;
+
+    // Promote to full active mode if we receive authorized data
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
-    Serial.println("[PWR] Authorized peer activity detected. Extending stay-awake mode.");
+    if (!is_promoted_to_active) {
+      is_promoted_to_active = true;
+      Serial.println("[PWR] Authorized peer activity detected. Promoted to ACTIVE mode (5m).");
+    }
   }
 };
 
@@ -117,6 +120,7 @@ SimpleMeshTables tables;
 
 MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 uint32_t active_mode_end_ms = 0;
+bool is_promoted_to_active = false;
 bool is_gps_cycle_active = false;
 uint32_t gps_start_ms = 0;
 
@@ -146,31 +150,27 @@ void setup() {
   sensors.begin();
   the_mesh.begin(&SPIFFS);
 
-  // Force initial sensor read to have telemetry data for first alert
   CayenneLPP dummy(64);
   sensors.querySensors(0xFF, dummy);
 
-  // If we woke up from radio, stay active for a while
   if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
-    active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
-    Serial.println("[PWR] Woke up by Radio. Entering 5-min active mode.");
-
-    // In radio wakeup, we still might want to do a GPS cycle if it's been a while,
-    // but the user requested periodic GPS. Let's trigger one if we aren't already.
-    is_gps_cycle_active = true;
-    gps_start_ms = millis();
-    digitalWrite(PIN_GPS_ENABLE, HIGH);
+    // Enter short LISTEN mode first
+    active_mode_end_ms = millis() + LISTEN_MODE_DURATION_MS;
+    is_promoted_to_active = false;
+    is_gps_cycle_active = false; // Don't start GPS report on random radio wakeup
+    Serial.println("[PWR] Woke up by Radio. Listening for 20s...");
   } else {
-    // Normal periodic wake up for GPS cycle
+    // Normal periodic wake up: Enter full active mode and do GPS report
+    active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
+    is_promoted_to_active = true;
     is_gps_cycle_active = true;
     gps_start_ms = millis();
     digitalWrite(PIN_GPS_ENABLE, HIGH);
-    Serial.println("[PWR] Periodic wake up. Starting GPS cycle.");
+    Serial.println("[PWR] Periodic wake up. Starting GPS reporting cycle.");
   }
 }
 
 void loop() {
-  // Console commands
   static char command_buf[160];
   int clen = strlen(command_buf);
   while (Serial.available() && clen < sizeof(command_buf) - 1) {
@@ -182,7 +182,8 @@ void loop() {
         the_mesh.handleCommand(0, command_buf, reply);
         if (reply[0]) Serial.println(reply);
         command_buf[0] = 0; clen = 0;
-        active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS; // Stay awake if using serial
+        active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
+        is_promoted_to_active = true;
       }
     } else {
       command_buf[clen++] = c;
@@ -196,7 +197,6 @@ void loop() {
 
   if (is_gps_cycle_active) {
     auto loc = sensors.getLocationProvider();
-    // Ensure we have a valid fix and non-zero coordinates
     if (loc && loc->isValid() && sensors.node_lat != 0.0) {
       double current_lat = sensors.node_lat;
       double current_lon = sensors.node_lon;
@@ -212,28 +212,25 @@ void loop() {
                current_lat, current_lon, current_alt, dist);
 
       the_mesh.sendChannelAlert(msg);
-      Serial.printf("[GPS] Fix acquired: %.6f,%.6f. Distance: %.1fm.\n", current_lat, current_lon, dist);
+      Serial.printf("[GPS] Fix acquired. Distance: %.1fm. Report sent.\n", dist);
 
-      // Update persistent storage
       last_known_lat = current_lat;
       last_known_lon = current_lon;
       last_known_alt = current_alt;
       has_any_gps_fix_ever = true;
 
-      // Finish cycle
       is_gps_cycle_active = false;
       digitalWrite(PIN_GPS_ENABLE, LOW);
 
-      // If we don't have an active mode timer running, we can go back to sleep soon
-      if (active_mode_end_ms == 0) {
-        active_mode_end_ms = millis() + 15000; // Give time for packet to leave
+      // If we are promoted, stay active. If not, sleep soon.
+      if (!is_promoted_to_active) {
+        active_mode_end_ms = millis() + 15000;
       }
     } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
       Serial.println("[GPS] Timeout waiting for fix.");
       is_gps_cycle_active = false;
       digitalWrite(PIN_GPS_ENABLE, LOW);
-
-      if (active_mode_end_ms == 0) {
+      if (!is_promoted_to_active) {
         active_mode_end_ms = millis() + 5000;
       }
     }
@@ -242,22 +239,11 @@ void loop() {
   // Handle sleep transition
   if (!is_gps_cycle_active) {
     if (active_mode_end_ms != 0 && millis() > active_mode_end_ms) {
-      Serial.println("[PWR] Active period over. Entering Deep Sleep...");
+      Serial.printf("[PWR] Entering Deep Sleep for %d seconds...\n", DEEP_SLEEP_INTERVAL_SEC);
       Serial.flush();
       delay(100);
-
-      // Safety: Clear radio interrupts before sleep
       radio.getIrqFlags();
-
       ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
-    } else if (active_mode_end_ms == 0) {
-        // We finished GPS cycle and had no active mode, sleep now
-        Serial.println("[PWR] Cycle finished. Entering Deep Sleep...");
-        Serial.flush();
-        delay(100);
-
-        radio.getIrqFlags();
-        ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
     }
   }
 }
