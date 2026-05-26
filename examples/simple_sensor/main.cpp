@@ -151,7 +151,7 @@ void setup() {
   sensors.querySensors(0xFF, dummy);
 
   // If we woke up from radio, stay active for a while
-  if (board.getStartupReason() == mesh::BD_STARTUP_RX_PACKET) {
+  if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     Serial.println("[PWR] Woke up by Radio. Entering 5-min active mode.");
 
