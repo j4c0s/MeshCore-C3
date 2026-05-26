@@ -1,29 +1,86 @@
 #include "SensorMesh.h"
+#include <math.h>
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
 #endif
 
+#define PIN_GPS_ENABLE 1
+#define ACTIVE_MODE_DURATION_MS 300000  // 5 minutes
+#define DEEP_SLEEP_INTERVAL_SEC 3600    // 1 hour
+#define GPS_TIMEOUT_MS 600000          // 10 minutes
+
+// Persistent state in RTC memory
+RTC_DATA_ATTR double last_known_lat = 0.0;
+RTC_DATA_ATTR double last_known_lon = 0.0;
+RTC_DATA_ATTR float last_known_alt = 0.0;
+RTC_DATA_ATTR bool has_any_gps_fix_ever = false;
+
+// Haversine formula to calculate distance in meters
+double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    double dLat = (lat2 - lat1) * M_PI / 180.0;
+    double dLon = (lon2 - lon1) * M_PI / 180.0;
+    lat1 = (lat1) * M_PI / 180.0;
+    lat2 = (lat2) * M_PI / 180.0;
+    double a = pow(sin(dLat / 2), 2) + pow(sin(dLon / 2), 2) * cos(lat1) * cos(lat2);
+    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return 6371000.0 * c;
+}
+
 class MyMesh : public SensorMesh {
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
      : SensorMesh(board, radio, ms, rng, rtc, tables), 
-       battery_data(12*24, 5*60)    // 24 hours worth of battery data, every 5 minutes
+       battery_data(12*24, 5*60)
   {
   }
 
+  float findInaVoltage() {
+    // Try to find voltage from any available channel
+    for (uint8_t ch = 1; ch <= 4; ch++) {
+      float v = getVoltage(ch);
+      if (v > 0.1f) return v;
+    }
+    return 0.0f;
+  }
+
+  void sendChannelAlert(const char* text) {
+    mesh::GroupChannel channel;
+    channel.hash[0] = 0x4C; // As per snippet
+
+    const uint8_t key[16] = {
+      0x3e, 0x72, 0x3e, 0x16, 0xeb, 0x4b, 0x25, 0x64,
+      0xfa, 0x23, 0x5e, 0x9f, 0x81, 0x6d, 0x49, 0x76
+    };
+    memcpy(channel.secret, key, 16);
+    memset(channel.secret + 16, 0x00, 16);
+
+    uint8_t data[MAX_PACKET_PAYLOAD];
+    uint32_t ts = getRTCClock()->getCurrentTime();
+    memcpy(data, &ts, 4);
+    data[4] = 0x00;
+    int len = 5 + snprintf((char*)&data[5], sizeof(data) - 5, "%s: %s",
+                            getNodeName(), text);
+
+    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
+    if (pkt) {
+      sendFlood(pkt);
+      Serial.println("[MESH] Alert sent to private channel.");
+    }
+  }
+
 protected:
-  /* ========================== custom logic here ========================== */
   Trigger low_batt, critical_batt;
-  TimeSeriesData  battery_data;
+  TimeSeriesData battery_data;
 
   void onSensorDataRead() override {
-    float batt_voltage = getVoltage(TELEM_CHANNEL_SELF);
+    float ina_voltage = findInaVoltage();
+    if (ina_voltage > 0.1f) {
+      battery_data.recordData(getRTCClock(), ina_voltage);
+    }
 
-    battery_data.recordData(getRTCClock(), batt_voltage);   // record battery
-    alertIf(batt_voltage < 3.4f, critical_batt, HIGH_PRI_ALERT, "Battery is critical!");
-    alertIf(batt_voltage < 3.6f, low_batt, LOW_PRI_ALERT, "Battery is low");
+    // Injected GPS position handling is done in loop() to manage sleep better
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
@@ -32,119 +89,154 @@ protected:
   }
 
   bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
-    if (strcmp(command, "magic") == 0) {    // example 'custom' command handling
-      strcpy(reply, "**Magic now done**");
-      return true;   // handled
+    if (strcmp(command, "status") == 0) {
+      sprintf(reply, "INA: %.2fV, GPS: %.6f,%.6f", findInaVoltage(), last_known_lat, last_known_lon);
+      return true;
     }
-    return false;  // not handled
+    return false;
   }
-  /* ======================================================================= */
+
+  // Override to detect authorized logins and stay awake
+  void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override {
+    SensorMesh::onPeerDataRecv(packet, type, sender_idx, secret, data, len);
+
+    // If we received peer data, it means we are talking to someone in our ACL
+    // Extend active mode
+    extern uint32_t active_mode_end_ms;
+    active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
+    Serial.println("[PWR] Authorized peer activity detected. Extending stay-awake mode.");
+  }
 };
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
 
 MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
-
-void halt() {
-  while (1) ;
-}
-
-static char command[160];
+uint32_t active_mode_end_ms = 0;
+bool is_gps_cycle_active = false;
+uint32_t gps_start_ms = 0;
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  Serial.println("--- Jaco Sensor Starting ---");
+
   board.begin();
 
-#ifdef DISPLAY_CLASS
-  if (display.begin()) {
-    display.startFrame();
-    display.print("Please wait...");
-    display.endFrame();
+  if (!radio_init()) {
+    Serial.println("Radio init failed!");
+    while(1);
   }
-#endif
-
-  if (!radio_init()) { halt(); }
 
   fast_rng.begin(radio_get_rng_seed());
 
-  FILESYSTEM* fs;
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  InternalFS.begin();
-  fs = &InternalFS;
-  IdentityStore store(InternalFS, "");
-#elif defined(ESP32)
   SPIFFS.begin(true);
-  fs = &SPIFFS;
   IdentityStore store(SPIFFS, "/identity");
-#elif defined(RP2040_PLATFORM)
-  LittleFS.begin();
-  fs = &LittleFS;
-  IdentityStore store(LittleFS, "/identity");
-  store.begin();
-#else
-  #error "need to define filesystem"
-#endif
+
   if (!store.load("_main", the_mesh.self_id)) {
-    MESH_DEBUG_PRINTLN("Generating new keypair");
-    the_mesh.self_id = radio_new_identity();   // create new random identity
-    int count = 0;
-    while (count < 10 && (the_mesh.self_id.pub_key[0] == 0x00 || the_mesh.self_id.pub_key[0] == 0xFF)) {  // reserved id hashes
-      the_mesh.self_id = radio_new_identity(); count++;
-    }
+    the_mesh.self_id = radio_new_identity();
     store.save("_main", the_mesh.self_id);
   }
 
-  Serial.print("Sensor ID: ");
-  mesh::Utils::printHex(Serial, the_mesh.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
-
-  command[0] = 0;
-
   sensors.begin();
+  the_mesh.begin(&SPIFFS);
 
-  the_mesh.begin(fs);
-
-#ifdef DISPLAY_CLASS
-  ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
-#endif
-
-  // send out initial zero hop Advertisement to the mesh
-#if ENABLE_ADVERT_ON_BOOT == 1
-  the_mesh.sendSelfAdvertisement(16000, false);
-#endif
+  // If we woke up from radio, stay active for a while
+  if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
+    active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
+    Serial.println("[PWR] Woke up by Radio. Entering 5-min active mode.");
+  } else {
+    // Normal periodic wake up for GPS cycle
+    is_gps_cycle_active = true;
+    gps_start_ms = millis();
+    digitalWrite(PIN_GPS_ENABLE, HIGH);
+    Serial.println("[PWR] Periodic wake up. Starting GPS cycle.");
+  }
 }
 
 void loop() {
-  int len = strlen(command);
-  while (Serial.available() && len < sizeof(command)-1) {
+  // Console commands
+  static char command_buf[160];
+  int clen = strlen(command_buf);
+  while (Serial.available() && clen < sizeof(command_buf) - 1) {
     char c = Serial.read();
-    if (c != '\n') {
-      command[len++] = c;
-      command[len] = 0;
+    if (c == '\r' || c == '\n') {
+      if (clen > 0) {
+        command_buf[clen] = 0;
+        char reply[160] = {0};
+        the_mesh.handleCommand(0, command_buf, reply);
+        if (reply[0]) Serial.println(reply);
+        command_buf[0] = 0; clen = 0;
+        active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS; // Stay awake if using serial
+      }
+    } else {
+      command_buf[clen++] = c;
+      command_buf[clen] = 0;
     }
-    Serial.print(c);
-  }
-  if (len == sizeof(command)-1) {  // command buffer full
-    command[sizeof(command)-1] = '\r';
   }
 
-  if (len > 0 && command[len - 1] == '\r') {  // received complete line
-    command[len - 1] = 0;  // replace newline with C string null terminator
-    char reply[160];
-    the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
-    if (reply[0]) {
-      Serial.print("  -> "); Serial.println(reply);
-    }
-
-    command[0] = 0;  // reset command buffer
-  }
-
-  the_mesh.loop();
   sensors.loop();
-#ifdef DISPLAY_CLASS
-  ui_task.loop();
-#endif
+  the_mesh.loop();
   rtc_clock.tick();
+
+  if (is_gps_cycle_active) {
+    auto loc = sensors.getLocationProvider();
+    if (loc && loc->isValid()) {
+      double current_lat = sensors.node_lat;
+      double current_lon = sensors.node_lon;
+      float current_alt = sensors.node_altitude;
+
+      double dist = 0;
+      if (has_any_gps_fix_ever) {
+        dist = calculateDistance(last_known_lat, last_known_lon, current_lat, current_lon);
+      }
+
+      char msg[128];
+      snprintf(msg, sizeof(msg), "Pos: %.6f,%.6f Alt: %.1f Dist: %.1fm Bat: %.2fV",
+               current_lat, current_lon, current_alt, dist, the_mesh.findInaVoltage());
+
+      the_mesh.sendChannelAlert(msg);
+      Serial.printf("[GPS] Fix acquired. Distance moved: %.1fm. Sending report.\n", dist);
+
+      // Update persistent storage
+      last_known_lat = current_lat;
+      last_known_lon = current_lon;
+      last_known_alt = current_alt;
+      has_any_gps_fix_ever = true;
+
+      // Finish cycle
+      is_gps_cycle_active = false;
+      digitalWrite(PIN_GPS_ENABLE, LOW);
+
+      // If we don't have an active mode timer running, we can go back to sleep soon
+      if (active_mode_end_ms == 0) {
+        active_mode_end_ms = millis() + 10000; // Give some time for packet to leave
+      }
+    } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
+      Serial.println("[GPS] Timeout waiting for fix.");
+      is_gps_cycle_active = false;
+      digitalWrite(PIN_GPS_ENABLE, LOW);
+
+      if (active_mode_end_ms == 0) {
+        active_mode_end_ms = millis() + 5000;
+      }
+    }
+  }
+
+  // Handle sleep transition
+  if (!is_gps_cycle_active) {
+    if (active_mode_end_ms != 0 && millis() > active_mode_end_ms) {
+      Serial.println("[PWR] Active period over. Entering Deep Sleep for 1 hour...");
+      Serial.flush();
+      delay(100);
+      ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
+    } else if (active_mode_end_ms == 0) {
+        // We finished GPS cycle and had no active mode, sleep now
+        Serial.println("[PWR] Cycle finished. Entering Deep Sleep for 1 hour...");
+        Serial.flush();
+        delay(100);
+        ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
+    }
+  }
 }

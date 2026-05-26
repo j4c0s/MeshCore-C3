@@ -3,6 +3,9 @@
 #include <helpers/ESP32Board.h>
 #include <Arduino.h>
 
+#include <driver/rtc_io.h>
+#include <driver/uart.h>
+
 #define PIN_GPS_EN 1
 
 class JacoSensorBoard : public ESP32Board {
@@ -10,15 +13,42 @@ public:
   void begin() {
     // GPS Power Control (NPN transistor on GND)
     pinMode(PIN_GPS_EN, OUTPUT);
-    digitalWrite(PIN_GPS_EN, HIGH); // Enable GPS by default
+
+    esp_reset_reason_t reason = esp_reset_reason();
+    if (reason == ESP_RST_DEEPSLEEP) {
+      uint64_t wakeup_source = esp_sleep_get_gpio_wakeup_status();
+      if (wakeup_source & (1ULL << P_LORA_DIO_1)) {
+        startup_reason = BD_STARTUP_RX_PACKET;
+      }
+    }
 
     ESP32Board::begin();
   }
 
+  void enterDeepSleep(uint32_t secs, int8_t wake_pin = -1) {
+    // Ensure GPS is off before sleep
+    digitalWrite(PIN_GPS_EN, LOW);
+
+    // LoRa DIO1 needs to be able to wake us up
+    if (P_LORA_DIO_1 >= 0) {
+      gpio_set_direction((gpio_num_t)P_LORA_DIO_1, GPIO_MODE_INPUT);
+      esp_deep_sleep_enable_gpio_wakeup(1ULL << P_LORA_DIO_1, ESP_GPIO_WAKEUP_GPIO_HIGH);
+    }
+
+    if (wake_pin >= 0) {
+      gpio_set_direction((gpio_num_t)wake_pin, GPIO_MODE_INPUT);
+      esp_deep_sleep_enable_gpio_wakeup(1ULL << wake_pin, ESP_GPIO_WAKEUP_GPIO_HIGH);
+    }
+
+    if (secs > 0) {
+      esp_sleep_enable_timer_wakeup((uint64_t)secs * 1000000ULL);
+    }
+
+    // Set ESP32-C3 into deep sleep
+    esp_deep_sleep_start();
+  }
+
   uint16_t getBattMilliVolts() override {
-    // Jaco didn't specify a battery read pin for his custom board,
-    // but typically it might be on an analog pin.
-    // If not specified, we return 0 or use a default if it's based on some other design.
     #ifdef PIN_VBAT_READ
       return ESP32Board::getBattMilliVolts();
     #else
