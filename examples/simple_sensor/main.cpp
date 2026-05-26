@@ -36,13 +36,15 @@ public:
   {
   }
 
-  float findInaVoltage() {
-    // Try to find voltage from any available channel
+  void formatAllInaVoltages(char* buf, size_t len) {
+    char* dp = buf;
+    int ofs = 0;
     for (uint8_t ch = 1; ch <= 4; ch++) {
       float v = getVoltage(ch);
-      if (v > 0.1f) return v;
+      if (v > 0.1f) {
+        ofs += snprintf(dp + ofs, len - ofs, "CH%d:%.2fV ", ch, v);
+      }
     }
-    return 0.0f;
   }
 
   void sendChannelAlert(const char* text) {
@@ -60,8 +62,12 @@ public:
     uint32_t ts = getRTCClock()->getCurrentTime();
     memcpy(data, &ts, 4);
     data[4] = 0x00;
-    int len = 5 + snprintf((char*)&data[5], sizeof(data) - 5, "%s: %s",
-                            getNodeName(), text);
+
+    char ina_info[64] = {0};
+    formatAllInaVoltages(ina_info, sizeof(ina_info));
+
+    int len = 5 + snprintf((char*)&data[5], sizeof(data) - 5, "%s: %s | %s",
+                            getNodeName(), text, ina_info);
 
     auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
     if (pkt) {
@@ -75,12 +81,8 @@ protected:
   TimeSeriesData battery_data;
 
   void onSensorDataRead() override {
-    float ina_voltage = findInaVoltage();
-    if (ina_voltage > 0.1f) {
-      battery_data.recordData(getRTCClock(), ina_voltage);
-    }
-
-    // Injected GPS position handling is done in loop() to manage sleep better
+    // Record primary battery (assuming CH1 is primary or uses board.getBattMilliVolts())
+    battery_data.recordData(getRTCClock(), (float)board.getBattMilliVolts() / 1000.0f);
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
@@ -90,7 +92,9 @@ protected:
 
   bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
     if (strcmp(command, "status") == 0) {
-      sprintf(reply, "INA: %.2fV, GPS: %.6f,%.6f", findInaVoltage(), last_known_lat, last_known_lon);
+      char ina_info[64] = {0};
+      formatAllInaVoltages(ina_info, sizeof(ina_info));
+      sprintf(reply, "INA: %s, GPS: %.6f,%.6f", ina_info, last_known_lat, last_known_lon);
       return true;
     }
     return false;
@@ -142,10 +146,20 @@ void setup() {
   sensors.begin();
   the_mesh.begin(&SPIFFS);
 
+  // Force initial sensor read to have telemetry data for first alert
+  CayenneLPP dummy(64);
+  sensors.querySensors(0xFF, dummy);
+
   // If we woke up from radio, stay active for a while
   if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     Serial.println("[PWR] Woke up by Radio. Entering 5-min active mode.");
+
+    // In radio wakeup, we still might want to do a GPS cycle if it's been a while,
+    // but the user requested periodic GPS. Let's trigger one if we aren't already.
+    is_gps_cycle_active = true;
+    gps_start_ms = millis();
+    digitalWrite(PIN_GPS_ENABLE, HIGH);
   } else {
     // Normal periodic wake up for GPS cycle
     is_gps_cycle_active = true;
@@ -182,7 +196,8 @@ void loop() {
 
   if (is_gps_cycle_active) {
     auto loc = sensors.getLocationProvider();
-    if (loc && loc->isValid()) {
+    // Ensure we have a valid fix and non-zero coordinates
+    if (loc && loc->isValid() && sensors.node_lat != 0.0) {
       double current_lat = sensors.node_lat;
       double current_lon = sensors.node_lon;
       float current_alt = sensors.node_altitude;
@@ -192,12 +207,12 @@ void loop() {
         dist = calculateDistance(last_known_lat, last_known_lon, current_lat, current_lon);
       }
 
-      char msg[128];
-      snprintf(msg, sizeof(msg), "Pos: %.6f,%.6f Alt: %.1f Dist: %.1fm Bat: %.2fV",
-               current_lat, current_lon, current_alt, dist, the_mesh.findInaVoltage());
+      char msg[64];
+      snprintf(msg, sizeof(msg), "Pos:%.6f,%.6f Alt:%.1f Dist:%.1fm",
+               current_lat, current_lon, current_alt, dist);
 
       the_mesh.sendChannelAlert(msg);
-      Serial.printf("[GPS] Fix acquired. Distance moved: %.1fm. Sending report.\n", dist);
+      Serial.printf("[GPS] Fix acquired: %.6f,%.6f. Distance: %.1fm.\n", current_lat, current_lon, dist);
 
       // Update persistent storage
       last_known_lat = current_lat;
@@ -211,7 +226,7 @@ void loop() {
 
       // If we don't have an active mode timer running, we can go back to sleep soon
       if (active_mode_end_ms == 0) {
-        active_mode_end_ms = millis() + 10000; // Give some time for packet to leave
+        active_mode_end_ms = millis() + 15000; // Give time for packet to leave
       }
     } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
       Serial.println("[GPS] Timeout waiting for fix.");
@@ -227,15 +242,21 @@ void loop() {
   // Handle sleep transition
   if (!is_gps_cycle_active) {
     if (active_mode_end_ms != 0 && millis() > active_mode_end_ms) {
-      Serial.println("[PWR] Active period over. Entering Deep Sleep for 1 hour...");
+      Serial.println("[PWR] Active period over. Entering Deep Sleep...");
       Serial.flush();
       delay(100);
+
+      // Safety: Clear radio interrupts before sleep
+      radio_driver.getRadio().getIrqFlags();
+
       ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
     } else if (active_mode_end_ms == 0) {
         // We finished GPS cycle and had no active mode, sleep now
-        Serial.println("[PWR] Cycle finished. Entering Deep Sleep for 1 hour...");
+        Serial.println("[PWR] Cycle finished. Entering Deep Sleep...");
         Serial.flush();
         delay(100);
+
+        radio_driver.getRadio().getIrqFlags();
         ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
     }
   }

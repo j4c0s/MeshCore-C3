@@ -14,15 +14,15 @@ public:
     // GPS Power Control (NPN transistor on GND)
     pinMode(PIN_GPS_EN, OUTPUT);
 
+    ESP32Board::begin();
+
     esp_reset_reason_t reason = esp_reset_reason();
     if (reason == ESP_RST_DEEPSLEEP) {
-      uint64_t wakeup_source = esp_sleep_get_gpio_wakeup_status();
-      if (wakeup_source & (1ULL << P_LORA_DIO_1)) {
+      uint64_t wakeup_pin_mask = esp_sleep_get_gpio_wakeup_status();
+      if (wakeup_pin_mask & (1ULL << P_LORA_DIO_1)) {
         startup_reason = BD_STARTUP_RX_PACKET;
       }
     }
-
-    ESP32Board::begin();
   }
 
   void enterDeepSleep(uint32_t secs, int8_t wake_pin = -1) {
