@@ -151,7 +151,7 @@ void setup() {
   sensors.querySensors(0xFF, dummy);
 
   // If we woke up from radio, stay active for a while
-  if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
+  if (board.getStartupReason() == mesh::BD_STARTUP_RX_PACKET) {
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     Serial.println("[PWR] Woke up by Radio. Entering 5-min active mode.");
 
@@ -247,7 +247,7 @@ void loop() {
       delay(100);
 
       // Safety: Clear radio interrupts before sleep
-      radio_driver.getRadio().getIrqFlags();
+      radio.getIrqFlags();
 
       ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
     } else if (active_mode_end_ms == 0) {
@@ -256,7 +256,7 @@ void loop() {
         Serial.flush();
         delay(100);
 
-        radio_driver.getRadio().getIrqFlags();
+        radio.getIrqFlags();
         ((JacoSensorBoard&)board).enterDeepSleep(DEEP_SLEEP_INTERVAL_SEC);
     }
   }

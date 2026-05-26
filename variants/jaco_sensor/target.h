@@ -9,6 +9,7 @@
 #include <helpers/sensors/EnvironmentSensorManager.h>
 
 extern JacoSensorBoard board;
+extern RADIO_CLASS radio;
 extern WRAPPER_CLASS radio_driver;
 extern AutoDiscoverRTCClock rtc_clock;
 extern EnvironmentSensorManager sensors;
