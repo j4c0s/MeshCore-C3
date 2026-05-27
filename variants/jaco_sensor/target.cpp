@@ -5,7 +5,9 @@
 JacoSensorBoard board;
 
 // Use the standard SPI instance
-RADIO_CLASS radio = RADIO_CLASS(new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI));
+// We use RADIOLIB_NC for reset to prevent automatic reset during radio.begin()
+// Reset is handled manually in radio_init()
+RADIO_CLASS radio = RADIO_CLASS(new Module(P_LORA_NSS, P_LORA_DIO_1, RADIOLIB_NC, P_LORA_BUSY, SPI));
 
 WRAPPER_CLASS radio_driver(radio, board);
 
@@ -48,7 +50,8 @@ bool radio_init() {
   #endif
 
   // Manual hardware reset for SX1262
-  if (P_LORA_RESET != RADIOLIB_NC) {
+  // We skip reset if woken up by radio to preserve state/packet
+  if (P_LORA_RESET != RADIOLIB_NC && board.getStartupReason() != BD_STARTUP_RX_PACKET) {
     pinMode(P_LORA_RESET, OUTPUT);
     digitalWrite(P_LORA_RESET, LOW);
     delay(10);

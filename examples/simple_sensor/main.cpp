@@ -92,7 +92,7 @@ public:
 
     auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
     if (pkt) {
-      sendFlood(pkt, 0, 3); // Use 3-byte path hashes (mode 2)
+      sendFlood(pkt, (uint32_t)0, (uint8_t)3); // Fixed ambiguous call
       log_ts("[MESH] Alert sent to private channel.");
     }
   }
@@ -122,9 +122,7 @@ protected:
     return false;
   }
 
-  void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override {
-    SensorMesh::onPeerDataRecv(packet, type, sender_idx, secret, data, len);
-
+  void promoteToActive() {
     extern uint32_t active_mode_end_ms;
     extern bool is_promoted_to_active;
     extern bool is_gps_cycle_active;
@@ -133,14 +131,36 @@ protected:
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     if (!is_promoted_to_active) {
       is_promoted_to_active = true;
-      log_ts("[PWR] Authorized peer activity detected. Promoted to ACTIVE mode (5m).");
+      log_ts("[PWR] Activity detected. Promoted to ACTIVE mode (5m).");
 
       if (!is_gps_cycle_active) {
         is_gps_cycle_active = true;
         gps_start_ms = millis();
         digitalWrite(PIN_GPS_ENABLE, HIGH);
-        log_ts("[PWR] Starting GPS cycle for authorized session.");
+        log_ts("[PWR] Starting GPS cycle for active session.");
       }
+    }
+  }
+
+  void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override {
+    SensorMesh::onPeerDataRecv(packet, type, sender_idx, secret, data, len);
+    promoteToActive();
+  }
+
+  void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override {
+    SensorMesh::onAnonDataRecv(packet, secret, sender, data, len);
+    // If it's a login request (even if invalid, it's activity), we might want to stay awake
+    // But since the user specifically mentioned ACL, we'll rely on onPeerDataRecv for full promotion.
+    // However, we should still extend the listen mode slightly if we see ANY valid traffic.
+    extern uint32_t active_mode_end_ms;
+    active_mode_end_ms = max(active_mode_end_ms, (uint32_t)(millis() + 30000));
+  }
+
+  void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
+    SensorMesh::onGroupDataRecv(packet, type, channel, data, len);
+    // Check if it's our channel
+    if (channel.hash[0] == 0x4C) {
+       promoteToActive();
     }
   }
 };
@@ -186,12 +206,14 @@ void setup() {
   sensors.querySensors(0xFF, dummy);
 
   if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
+    // Radio wakeup: Short listen mode, NO GPS
     active_mode_end_ms = millis() + LISTEN_MODE_DURATION_MS;
     is_promoted_to_active = false;
     is_gps_cycle_active = false;
     digitalWrite(PIN_GPS_ENABLE, LOW);
     log_ts("[PWR] Woke up by Radio. Listening for 20s (GPS OFF).");
   } else {
+    // Timer or Power-on: Full cycle, GPS ON
     active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
     is_promoted_to_active = true;
     is_gps_cycle_active = true;
