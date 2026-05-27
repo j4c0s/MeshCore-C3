@@ -13,6 +13,7 @@ public:
   void begin() {
     // GPS Power Control (NPN transistor on GND)
     pinMode(PIN_GPS_EN, OUTPUT);
+    digitalWrite(PIN_GPS_EN, LOW); // GPS off by default
 
     ESP32Board::begin();
 
@@ -25,11 +26,18 @@ public:
     }
   }
 
+  // MeshCore uses sleep() for its internal powersaving (Light Sleep)
+  void sleep(uint32_t secs) override {
+    // Only enter sleep if no GPS cycle is active
+    extern bool is_gps_cycle_active;
+    if (!is_gps_cycle_active) {
+       ESP32Board::sleep(secs);
+    }
+  }
+
   void enterDeepSleep(uint32_t secs, int8_t wake_pin = -1) {
-    // Ensure GPS is off before sleep
     digitalWrite(PIN_GPS_EN, LOW);
 
-    // LoRa DIO1 needs to be able to wake us up
     if (P_LORA_DIO_1 >= 0) {
       gpio_set_direction((gpio_num_t)P_LORA_DIO_1, GPIO_MODE_INPUT);
       esp_deep_sleep_enable_gpio_wakeup(1ULL << P_LORA_DIO_1, ESP_GPIO_WAKEUP_GPIO_HIGH);
@@ -44,7 +52,6 @@ public:
       esp_sleep_enable_timer_wakeup((uint64_t)secs * 1000000ULL);
     }
 
-    // Set ESP32-C3 into deep sleep
     esp_deep_sleep_start();
   }
 

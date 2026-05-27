@@ -8,12 +8,11 @@
 #endif
 
 #define PIN_GPS_ENABLE 1
-#define ACTIVE_MODE_DURATION_MS 300000  // 5 minutes
-#define LISTEN_MODE_DURATION_MS 20000   // 20 seconds short listen
 #define GPS_TIMEOUT_MS 600000          // 10 minutes
 #define GPS_STABILIZE_MS 10000         // 10 seconds stabilization after fix
 
-// Persistent state in RTC memory
+// State persists in light sleep, so no need for RTC_DATA_ATTR,
+// but we keep it for robustness across reboots.
 RTC_DATA_ATTR double last_known_lat = 0.0;
 RTC_DATA_ATTR double last_known_lon = 0.0;
 RTC_DATA_ATTR float last_known_alt = 0.0;
@@ -67,7 +66,7 @@ public:
 
   void sendChannelAlert(const char* text) {
     mesh::GroupChannel channel;
-    channel.hash[0] = 0x4C; // As per snippet
+    channel.hash[0] = 0x4C;
 
     const uint8_t key[16] = {
       0x3e, 0x72, 0x3e, 0x16, 0xeb, 0x4b, 0x25, 0x64,
@@ -92,7 +91,7 @@ public:
 
     auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
     if (pkt) {
-      sendFlood(pkt, (uint32_t)0, (uint8_t)3); // Fixed ambiguous call
+      sendFlood(pkt, (uint32_t)0, (uint8_t)3);
       log_ts("[MESH] Alert sent to private channel.");
     }
   }
@@ -122,45 +121,29 @@ protected:
     return false;
   }
 
-  void promoteToActive() {
-    extern uint32_t active_mode_end_ms;
-    extern bool is_promoted_to_active;
+  void startGpsOnDemand() {
     extern bool is_gps_cycle_active;
     extern uint32_t gps_start_ms;
-
-    active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
-    if (!is_promoted_to_active) {
-      is_promoted_to_active = true;
-      log_ts("[PWR] Activity detected. Promoted to ACTIVE mode (5m).");
-
-      if (!is_gps_cycle_active) {
-        is_gps_cycle_active = true;
-        gps_start_ms = millis();
-        digitalWrite(PIN_GPS_ENABLE, HIGH);
-        log_ts("[PWR] Starting GPS cycle for active session.");
-      }
+    if (!is_gps_cycle_active) {
+      is_gps_cycle_active = true;
+      gps_start_ms = millis();
+      digitalWrite(PIN_GPS_ENABLE, HIGH);
+      log_ts("[PWR] GPS triggered on demand.");
     }
   }
 
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override {
     SensorMesh::onPeerDataRecv(packet, type, sender_idx, secret, data, len);
-    promoteToActive();
-  }
-
-  void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override {
-    SensorMesh::onAnonDataRecv(packet, secret, sender, data, len);
-    // If it's a login request (even if invalid, it's activity), we might want to stay awake
-    // But since the user specifically mentioned ACL, we'll rely on onPeerDataRecv for full promotion.
-    // However, we should still extend the listen mode slightly if we see ANY valid traffic.
-    extern uint32_t active_mode_end_ms;
-    active_mode_end_ms = max(active_mode_end_ms, (uint32_t)(millis() + 30000));
+    // If telemetry or status is requested, start GPS to have fresh position
+    if (type == PAYLOAD_TYPE_REQ) {
+       startGpsOnDemand();
+    }
   }
 
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
     SensorMesh::onGroupDataRecv(packet, type, channel, data, len);
-    // Check if it's our channel
     if (channel.hash[0] == 0x4C) {
-       promoteToActive();
+       startGpsOnDemand();
     }
   }
 };
@@ -169,18 +152,17 @@ StdRNG fast_rng;
 SimpleMeshTables tables;
 
 MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
-uint32_t active_mode_end_ms = 0;
-bool is_promoted_to_active = false;
 bool is_gps_cycle_active = false;
 uint32_t gps_start_ms = 0;
 uint32_t gps_fix_acquired_ms = 0;
 bool is_gps_stabilizing = false;
+uint32_t last_hourly_report_hour = 0xFFFFFFFF;
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  log_ts("--- Jaco Sensor Starting ---");
+  log_ts("--- Jaco Sensor Starting (Light Sleep Mode) ---");
 
   board.begin();
 
@@ -202,27 +184,19 @@ void setup() {
   sensors.begin();
   the_mesh.begin(&SPIFFS);
 
+  // Enable MeshCore internal powersaving
+  the_mesh.getNodePrefs()->powersaving_enabled = 1;
+
   CayenneLPP dummy(64);
   sensors.querySensors(0xFF, dummy);
 
-  if (board.getStartupReason() == BD_STARTUP_RX_PACKET) {
-    // Radio wakeup: Short listen mode, NO GPS
-    active_mode_end_ms = millis() + LISTEN_MODE_DURATION_MS;
-    is_promoted_to_active = false;
-    is_gps_cycle_active = false;
-    digitalWrite(PIN_GPS_ENABLE, LOW);
-    log_ts("[PWR] Woke up by Radio. Listening for 20s (GPS OFF).");
-  } else {
-    // Timer or Power-on: Full cycle, GPS ON
-    active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
-    is_promoted_to_active = true;
-    is_gps_cycle_active = true;
-    gps_start_ms = millis();
-    gps_fix_acquired_ms = 0;
-    is_gps_stabilizing = false;
-    digitalWrite(PIN_GPS_ENABLE, HIGH);
-    log_ts("[PWR] Scheduled/Power-on wakeup. Starting GPS cycle.");
-  }
+  // Initial GPS cycle on boot
+  is_gps_cycle_active = true;
+  gps_start_ms = millis();
+  gps_fix_acquired_ms = 0;
+  is_gps_stabilizing = false;
+  digitalWrite(PIN_GPS_ENABLE, HIGH);
+  log_ts("[PWR] Booting. Starting initial GPS cycle.");
 }
 
 void loop() {
@@ -239,8 +213,7 @@ void loop() {
         if (reply[0]) log_ts(" -> %s", reply);
         command_buf[0] = 0; clen = 0;
 
-        active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
-        is_promoted_to_active = true;
+        // Start GPS on manual console interaction too
         if (!is_gps_cycle_active) {
           is_gps_cycle_active = true;
           gps_start_ms = millis();
@@ -256,6 +229,21 @@ void loop() {
   sensors.loop();
   the_mesh.loop();
   rtc_clock.tick();
+
+  uint32_t now_utc = rtc_clock.getCurrentTime();
+  uint32_t current_hour = now_utc / 3600;
+
+  // Check for scheduled hourly report
+  if (now_utc > 1704067200 && current_hour != last_hourly_report_hour) {
+    if (!is_gps_cycle_active) {
+      log_ts("[PWR] Hourly scheduled wake. Starting GPS cycle.");
+      is_gps_cycle_active = true;
+      gps_start_ms = millis();
+      is_gps_stabilizing = false;
+      digitalWrite(PIN_GPS_ENABLE, HIGH);
+    }
+    last_hourly_report_hour = current_hour;
+  }
 
   if (is_gps_cycle_active) {
     auto loc = sensors.getLocationProvider();
@@ -291,33 +279,12 @@ void loop() {
         is_gps_cycle_active = false;
         is_gps_stabilizing = false;
         digitalWrite(PIN_GPS_ENABLE, LOW);
-
-        if (!is_promoted_to_active) {
-          active_mode_end_ms = millis() + 15000;
-        }
       }
     } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
       log_ts("[GPS] Timeout waiting for fix.");
       is_gps_cycle_active = false;
       is_gps_stabilizing = false;
       digitalWrite(PIN_GPS_ENABLE, LOW);
-      if (!is_promoted_to_active) {
-        active_mode_end_ms = millis() + 5000;
-      }
-    }
-  }
-
-  if (!is_gps_cycle_active) {
-    if (active_mode_end_ms != 0 && millis() > active_mode_end_ms) {
-      uint32_t now_utc = rtc_clock.getCurrentTime();
-      uint32_t seconds_until_next_hour = 3600 - (now_utc % 3600);
-      if (now_utc < 1704067200) seconds_until_next_hour = 3600;
-
-      log_ts("[PWR] Entering Deep Sleep. Next wake in %lu seconds.", seconds_until_next_hour);
-      Serial.flush();
-      delay(100);
-      radio.getIrqFlags();
-      ((JacoSensorBoard&)board).enterDeepSleep(seconds_until_next_hour);
     }
   }
 }
