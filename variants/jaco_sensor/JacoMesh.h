@@ -129,7 +129,10 @@ protected:
   TimeSeriesData battery_data;
 
   void onSensorDataRead() override {
-    battery_data.recordData(getRTCClock(), (float)board.getBattMilliVolts() / 1000.0f);
+    float v = findInaVoltage();
+    if (v > 0.1f) {
+      battery_data.recordData(getRTCClock(), v);
+    }
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {

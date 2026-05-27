@@ -118,8 +118,9 @@ static uint32_t getMultiplier(uint8_t type) {
         return 100;
       case LPP_TEMPERATURE:
       case LPP_BAROMETRIC_PRESSURE:
-      case LPP_RELATIVE_HUMIDITY:
         return 10;
+      case LPP_RELATIVE_HUMIDITY:
+        return 2;
     }
     return 1;
 }
