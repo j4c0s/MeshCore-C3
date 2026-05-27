@@ -49,6 +49,14 @@ public:
   {
   }
 
+  float findInaVoltage() {
+    for (uint8_t ch = 1; ch <= 4; ch++) {
+      float v = getVoltage(ch);
+      if (v > 0.1f) return v;
+    }
+    return 0.0f;
+  }
+
   void formatAllInaVoltages(char* buf, size_t len) {
     char* dp = buf;
     int ofs = 0;
