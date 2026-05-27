@@ -92,7 +92,7 @@ public:
 
     auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
     if (pkt) {
-      sendFlood(pkt);
+      sendFlood(pkt, 0, 3); // Use 3-byte path hashes (mode 2)
       log_ts("[MESH] Alert sent to private channel.");
     }
   }
