@@ -174,6 +174,8 @@ protected:
       is_gps_cycle_active = true;
       gps_start_ms = millis();
       digitalWrite(PIN_GPS_ENABLE, HIGH);
+      auto loc = sensors.getLocationProvider();
+      if (loc) loc->syncTime(); // Clear NMEA buffer
       log_ts("[PWR] GPS triggered on demand.");
     }
   }
@@ -229,6 +231,8 @@ void setup() {
   is_gps_cycle_active = true;
   gps_start_ms = millis();
   digitalWrite(PIN_GPS_ENABLE, HIGH);
+  auto loc = sensors.getLocationProvider();
+  if (loc) loc->syncTime(); // Clear NMEA buffer
   log_ts("[PWR] Initializing sensors and GPS.");
 }
 
@@ -273,6 +277,8 @@ void loop() {
       is_gps_cycle_active = true;
       gps_start_ms = millis();
       digitalWrite(PIN_GPS_ENABLE, HIGH);
+      auto loc = sensors.getLocationProvider();
+      if (loc) loc->syncTime(); // Clear NMEA buffer
     }
   } else if (now_utc > 1704067200 && current_minute == 30 && current_hour != last_report_pvt_hour) {
      if (!is_gps_cycle_active) {
@@ -280,6 +286,8 @@ void loop() {
       is_gps_cycle_active = true;
       gps_start_ms = millis();
       digitalWrite(PIN_GPS_ENABLE, HIGH);
+      auto loc = sensors.getLocationProvider();
+      if (loc) loc->syncTime(); // Clear NMEA buffer
     }
   }
 
