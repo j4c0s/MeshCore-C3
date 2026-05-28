@@ -234,8 +234,10 @@ protected:
       gps_start_ms = millis();
       digitalWrite(PIN_GPS_ENABLE, HIGH);
       auto loc = sensors.getLocationProvider();
-      if (loc) loc->syncTime();
-      log_ts("[PWR] GPS triggered on demand.");
+      if (loc) {
+        loc->syncTime();
+        log_ts("[PWR] GPS powered ON (On-demand). NMEA buffer cleared.");
+      }
     }
   }
 
@@ -262,7 +264,6 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // Initialize file system first to load prefs
   if(!SPIFFS.begin(true)){
      Serial.println("SPIFFS Mount Failed");
   }
@@ -287,7 +288,6 @@ void setup() {
   sensors.begin();
   the_mesh.begin(&SPIFFS);
 
-  // Universal Defaults for new devices
   if (strlen(the_mesh.getNodePrefs()->node_name) == 0 || strcmp(the_mesh.getNodePrefs()->node_name, "sensor") == 0) {
      strcpy(the_mesh.getNodePrefs()->node_name, "MeshSensor");
   }
@@ -300,13 +300,12 @@ void setup() {
   CayenneLPP dummy(64);
   sensors.querySensors(0xFF, dummy);
 
-  // Initial GPS cycle
   is_gps_cycle_active = true;
   gps_start_ms = millis();
   digitalWrite(PIN_GPS_ENABLE, HIGH);
   auto loc = sensors.getLocationProvider();
   if (loc) loc->syncTime();
-  log_ts("[PWR] Initializing sensors and GPS.");
+  log_ts("[PWR] Initializing GPS for boot cycle. NMEA buffer cleared.");
 }
 
 void loop() {
@@ -329,7 +328,10 @@ void loop() {
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_ENABLE, HIGH);
           auto loc = sensors.getLocationProvider();
-          if (loc) loc->syncTime();
+          if (loc) {
+            loc->syncTime();
+            log_ts("[PWR] GPS powered ON (Console activity). NMEA buffer cleared.");
+          }
         }
       }
     } else {
@@ -344,14 +346,12 @@ void loop() {
 
   uint32_t now_utc = rtc_clock.getCurrentTime();
 
-  // REPORTING LOGIC
   if (now_utc > 1704067200) {
       uint32_t now_mins = now_utc / 60;
 
-      // Group Report Interval
       if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0 && now_mins != last_report_group_ts) {
         if (!is_gps_cycle_active) {
-          log_ts("[PWR] Scheduled Group Report cycle.");
+          log_ts("[PWR] Scheduled Group Report cycle. Powering ON GPS.");
           is_gps_cycle_active = true;
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_ENABLE, HIGH);
@@ -360,10 +360,9 @@ void loop() {
         }
       }
 
-      // Private Report Interval (offset by 1 min if intervals overlap)
       if (j_prefs.pvt_interval_mins > 0 && ((now_mins + (j_prefs.group_interval_mins == j_prefs.pvt_interval_mins ? 1 : 0)) % j_prefs.pvt_interval_mins) == 0 && now_mins != last_report_pvt_ts) {
         if (!is_gps_cycle_active) {
-          log_ts("[PWR] Scheduled Private Report cycle.");
+          log_ts("[PWR] Scheduled Private Report cycle. Powering ON GPS.");
           is_gps_cycle_active = true;
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_ENABLE, HIGH);
@@ -376,13 +375,36 @@ void loop() {
   if (is_gps_cycle_active) {
     static uint32_t gps_fix_acquired_ms = 0;
     static bool is_gps_stabilizing = false;
+    static uint32_t last_gps_debug = 0;
 
     auto loc = sensors.getLocationProvider();
-    if (loc && loc->isValid() && sensors.node_lat != 0.0) {
+    bool has_valid_fix = (loc && loc->isValid() && sensors.node_lat != 0.0);
+
+    // Periodic GPS status debug (every 5s)
+    if (millis() - last_gps_debug > 5000) {
+        last_gps_debug = millis();
+        if (loc) {
+            log_ts("[GPS-DEBUG] Uptime: %lus | Sats: %d | Fix: %s | Lat: %.6f Lon: %.6f",
+                   (millis() - gps_start_ms) / 1000,
+                   (int)loc->satellitesCount(),
+                   has_valid_fix ? "YES" : "NO",
+                   sensors.node_lat, sensors.node_lon);
+        }
+    }
+
+    if (has_valid_fix) {
       if (!is_gps_stabilizing) {
         is_gps_stabilizing = true;
         gps_fix_acquired_ms = millis();
         log_ts("[GPS] Fix acquired. Stabilizing for 10s...");
+      }
+
+      // Log coordinates during stabilization
+      static uint32_t last_stabilize_log = 0;
+      if (millis() - last_stabilize_log > 2000) {
+          last_stabilize_log = millis();
+          log_ts("[GPS-STABILIZE] Current: %.6f, %.6f (Time left: %lus)",
+                 sensors.node_lat, sensors.node_lon, (GPS_STABILIZE_MS - (millis() - gps_fix_acquired_ms)) / 1000);
       }
 
       if (millis() - gps_fix_acquired_ms > GPS_STABILIZE_MS) {
@@ -392,8 +414,6 @@ void loop() {
         double dist = has_any_gps_fix_ever ? calculateDistance(last_known_lat, last_known_lon, lat, lon) : 0;
 
         uint32_t now_mins = now_utc / 60;
-
-        // Decide what to send
         bool sent = false;
         if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0) {
             the_mesh.sendGroupReport(lat, lon, alt, dist);
@@ -408,9 +428,10 @@ void loop() {
         }
 
         if (!sent) {
-            // Boot or on-demand
             the_mesh.sendGroupReport(lat, lon, alt, dist);
         }
+
+        log_ts("[GPS] Final Fix: %.6f, %.6f. Distance moved: %.1fm. Report sent.", lat, lon, dist);
 
         last_known_lat = lat;
         last_known_lon = lon;
@@ -420,12 +441,14 @@ void loop() {
         is_gps_cycle_active = false;
         is_gps_stabilizing = false;
         digitalWrite(PIN_GPS_ENABLE, LOW);
+        log_ts("[PWR] GPS powered OFF.");
       }
     } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
-      log_ts("[GPS] Timeout waiting for fix.");
+      log_ts("[GPS] Timeout waiting for fix. Giving up.");
       is_gps_cycle_active = false;
       is_gps_stabilizing = false;
       digitalWrite(PIN_GPS_ENABLE, LOW);
+      log_ts("[PWR] GPS powered OFF.");
     }
   }
 }
