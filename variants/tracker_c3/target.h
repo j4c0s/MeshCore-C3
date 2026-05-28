@@ -3,12 +3,12 @@
 #define RADIOLIB_STATIC_ONLY 1
 #include <RadioLib.h>
 #include <helpers/radiolib/RadioLibWrappers.h>
-#include "JacoSensorBoard.h"
+#include "TrackerBoard.h"
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
 #include <helpers/AutoDiscoverRTCClock.h>
 #include <helpers/sensors/EnvironmentSensorManager.h>
 
-extern JacoSensorBoard board;
+extern TrackerBoard board;
 extern RADIO_CLASS radio;
 extern WRAPPER_CLASS radio_driver;
 extern AutoDiscoverRTCClock rtc_clock;

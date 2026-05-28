@@ -8,7 +8,7 @@
 
 #define PIN_GPS_EN 1
 
-class JacoSensorBoard : public ESP32Board {
+class TrackerBoard : public ESP32Board {
 public:
   void begin() {
     // GPS Power Control (NPN transistor on GND)
@@ -64,6 +64,6 @@ public:
   }
 
   const char* getManufacturerName() const override {
-    return "Jaco Custom ESP32-C3";
+    return "MeshTracker ESP32-C3";
   }
 };

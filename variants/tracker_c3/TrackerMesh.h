@@ -8,31 +8,32 @@
 #define ACTIVE_MODE_DURATION_MS 300000  // 5 minutes
 #define ON_DEMAND_GPS_DURATION_MS 120000 // 2 minutes stay-awake for GPS
 #define GPS_TIMEOUT_MS 600000          // 10 minutes
-#define GPS_STABILIZE_TIMEOUT_MS 20000 // Max 20s wait for HDOP
-#define TARGET_ACCURACY_METERS 25.0f   // Target accuracy in meters (approx HDOP 5.0)
+#define GPS_STABILIZE_TIMEOUT_MS 20000 // Max 20s wait for accuracy
+#define TARGET_ACCURACY_METERS 25.0f   // Target accuracy in meters
 
-// State Persistence
+// State Persistence (Shared with main.cpp)
 extern double last_known_lat;
 extern double last_known_lon;
 extern float last_known_alt;
 extern bool has_any_gps_fix_ever;
 
-// Power and Report State
+// Power and Report State (Shared with main.cpp)
 extern bool is_gps_cycle_active;
 extern uint32_t gps_start_ms;
 extern uint32_t active_mode_end_ms;
 extern uint32_t last_report_group_ts;
 extern uint32_t last_report_pvt_ts;
 
-struct JacoPrefs {
+struct TrackerPrefs {
   uint8_t channel_hash;
   uint8_t channel_key[16];
   uint16_t group_interval_mins;
   uint16_t pvt_interval_mins;
-} extern j_prefs;
+  char channel_scope[32]; // Scope for the Group Channel
+} extern t_prefs;
 
-void loadJacoPrefs();
-void saveJacoPrefs();
+void loadTrackerPrefs();
+void saveTrackerPrefs();
 void log_ts(const char* format, ...);
 
 // Haversine formula
@@ -51,9 +52,9 @@ inline float hdopToMeters(float hdop) {
     return hdop * 5.0f;
 }
 
-class JacoMesh : public SensorMesh {
+class TrackerMesh : public SensorMesh {
 public:
-  JacoMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
+  TrackerMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
      : SensorMesh(board, radio, ms, rng, rtc, tables),
        battery_data(12*24, 5*60)
   {
@@ -91,8 +92,8 @@ public:
 
   void sendGroupReport(double lat, double lon, float alt, double dist, float hdop) {
     mesh::GroupChannel channel;
-    channel.hash[0] = j_prefs.channel_hash;
-    memcpy(channel.secret, j_prefs.channel_key, 16);
+    channel.hash[0] = t_prefs.channel_hash;
+    memcpy(channel.secret, t_prefs.channel_key, 16);
     memset(channel.secret + 16, 0x00, 16);
 
     uint8_t data[MAX_PACKET_PAYLOAD];
@@ -106,8 +107,21 @@ public:
 
     auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
     if (pkt) {
+      uint32_t d = 0;
+      if (strlen(t_prefs.channel_scope) > 0) {
+        auto region = region_map.findByName(t_prefs.channel_scope);
+        if (region) {
+          TransportKey keys[2];
+          int n = region_map.getTransportKeysFor(*region, keys, 2);
+          if (n > 0) {
+            sendFlood(pkt, (uint16_t*)keys, d, 3);
+            log_ts("[MESH] Group report sent (Scope: %s).", t_prefs.channel_scope);
+            return;
+          }
+        }
+      }
       sendFlood(pkt, (uint32_t)0, (uint8_t)3);
-      log_ts("[MESH] Group report sent.");
+      log_ts("[MESH] Group report sent (Default Flood).");
     }
   }
 
@@ -161,28 +175,34 @@ protected:
       return true;
     }
 
-    if (strcmp(command, "sensor help") == 0) {
-      strcpy(reply, "Commands: set channel.key {hex}, set reporting.group {mins}, set reporting.pvt {mins}, status");
+    if (strcmp(command, "tracker help") == 0) {
+      strcpy(reply, "Commands: set channel.key {hex}, set channel.scope {name}, set reporting.group {mins}, set reporting.pvt {mins}, status");
       return true;
     }
 
     if (memcmp(command, "set channel.key ", 16) == 0) {
-      mesh::Utils::fromHex(j_prefs.channel_key, 16, &command[16]);
-      j_prefs.channel_hash = j_prefs.channel_key[0];
-      saveJacoPrefs();
+      mesh::Utils::fromHex(t_prefs.channel_key, 16, &command[16]);
+      t_prefs.channel_hash = t_prefs.channel_key[0];
+      saveTrackerPrefs();
       strcpy(reply, "OK - Channel Configured");
       return true;
     }
+    if (memcmp(command, "set channel.scope ", 18) == 0) {
+      strcpy(t_prefs.channel_scope, &command[18]);
+      saveTrackerPrefs();
+      sprintf(reply, "OK - Group channel scope set to: %s", t_prefs.channel_scope);
+      return true;
+    }
     if (memcmp(command, "set reporting.group ", 20) == 0) {
-      j_prefs.group_interval_mins = atoi(&command[20]);
-      saveJacoPrefs();
-      sprintf(reply, "OK - Group reporting every %d mins", j_prefs.group_interval_mins);
+      t_prefs.group_interval_mins = atoi(&command[20]);
+      saveTrackerPrefs();
+      sprintf(reply, "OK - Group reporting every %d mins", t_prefs.group_interval_mins);
       return true;
     }
     if (memcmp(command, "set reporting.pvt ", 18) == 0) {
-      j_prefs.pvt_interval_mins = atoi(&command[18]);
-      saveJacoPrefs();
-      sprintf(reply, "OK - Private reporting every %d mins", j_prefs.pvt_interval_mins);
+      t_prefs.pvt_interval_mins = atoi(&command[18]);
+      saveTrackerPrefs();
+      sprintf(reply, "OK - Private reporting every %d mins", t_prefs.pvt_interval_mins);
       return true;
     }
 
@@ -211,9 +231,7 @@ protected:
   }
 
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
-    // SensorMesh doesn't override this, so we don't call it.
-    // We can call the base Mesh version if needed.
-    if (channel.hash[0] == j_prefs.channel_hash) {
+    if (channel.hash[0] == t_prefs.channel_hash) {
        startGpsOnDemand();
     }
   }

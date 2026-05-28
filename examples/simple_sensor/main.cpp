@@ -1,4 +1,4 @@
-#include "JacoMesh.h"
+#include "TrackerMesh.h"
 #include <SPIFFS.h>
 #include "target.h"
 #include <RTClib.h>
@@ -22,27 +22,28 @@ RTC_DATA_ATTR float last_known_alt = 0.0;
 RTC_DATA_ATTR bool has_any_gps_fix_ever = false;
 
 // Global Prefs
-JacoPrefs j_prefs;
+TrackerPrefs t_prefs;
 
-void loadJacoPrefs() {
-  File file = SPIFFS.open("/jaco_prefs", "r");
-  if (file && file.size() == sizeof(j_prefs)) {
-    file.read((uint8_t*)&j_prefs, sizeof(j_prefs));
+void loadTrackerPrefs() {
+  File file = SPIFFS.open("/tracker_prefs", "r");
+  if (file && file.size() == sizeof(t_prefs)) {
+    file.read((uint8_t*)&t_prefs, sizeof(t_prefs));
     file.close();
   } else {
     // Defaults: Disabled reporting
-    j_prefs.channel_hash = 0x4C;
+    t_prefs.channel_hash = 0x4C;
     uint8_t def_key[16] = { 0x3e, 0x72, 0x3e, 0x16, 0xeb, 0x4b, 0x25, 0x64, 0xfa, 0x23, 0x5e, 0x9f, 0x81, 0x6d, 0x49, 0x76 };
-    memcpy(j_prefs.channel_key, def_key, 16);
-    j_prefs.group_interval_mins = 0;
-    j_prefs.pvt_interval_mins = 0;
+    memcpy(t_prefs.channel_key, def_key, 16);
+    t_prefs.group_interval_mins = 0;
+    t_prefs.pvt_interval_mins = 0;
+    memset(t_prefs.pvt_scope, 0, sizeof(t_prefs.pvt_scope));
   }
 }
 
-void saveJacoPrefs() {
-  File file = SPIFFS.open("/jaco_prefs", "w", true);
+void saveTrackerPrefs() {
+  File file = SPIFFS.open("/tracker_prefs", "w", true);
   if (file) {
-    file.write((uint8_t*)&j_prefs, sizeof(j_prefs));
+    file.write((uint8_t*)&t_prefs, sizeof(t_prefs));
     file.close();
   }
 }
@@ -65,7 +66,7 @@ void log_ts(const char* format, ...) {
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
-JacoMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
+TrackerMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 
 void setup() {
   Serial.begin(115200);
@@ -74,9 +75,9 @@ void setup() {
   if(!SPIFFS.begin(true)){
      Serial.println("SPIFFS Mount Failed");
   }
-  loadJacoPrefs();
+  loadTrackerPrefs();
 
-  log_ts("--- Jaco Universal Tracker Starting ---");
+  log_ts("--- MeshTracker Starting ---");
 
   board.begin();
   if (!radio_init()) {
@@ -155,7 +156,7 @@ void loop() {
   if (now_utc > 1704067200) {
       uint32_t now_mins = now_utc / 60;
 
-      if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0 && now_mins != last_report_group_ts) {
+      if (t_prefs.group_interval_mins > 0 && (now_mins % t_prefs.group_interval_mins) == 0 && now_mins != last_report_group_ts) {
         if (!is_gps_cycle_active) {
           log_ts("[PWR] Scheduled Group Report cycle.");
           is_gps_cycle_active = true;
@@ -166,7 +167,7 @@ void loop() {
         }
       }
 
-      if (j_prefs.pvt_interval_mins > 0 && ((now_mins + (j_prefs.group_interval_mins == j_prefs.pvt_interval_mins ? 1 : 0)) % j_prefs.pvt_interval_mins) == 0 && now_mins != last_report_pvt_ts) {
+      if (t_prefs.pvt_interval_mins > 0 && ((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0 && now_mins != last_report_pvt_ts) {
         if (!is_gps_cycle_active) {
           log_ts("[PWR] Scheduled Private Report cycle.");
           is_gps_cycle_active = true;
@@ -212,7 +213,7 @@ void loop() {
       bool is_timed_out = (millis() - gps_fix_acquired_ms > GPS_STABILIZE_TIMEOUT_MS);
 
       if (is_precise_enough || is_timed_out) {
-        if (is_precise_enough) log_ts("[GPS] Target precision reached (~%.0fm).", current_acc);
+        if (is_precise_enough) log_ts("[GPS) Target precision reached (~%.0fm).", current_acc);
         else log_ts("[GPS] Stabilization timeout. Sending best available fix (~%.0fm).", current_acc);
 
         double lat = sensors.node_lat;
@@ -222,13 +223,13 @@ void loop() {
 
         uint32_t now_mins = now_utc / 60;
         bool sent = false;
-        if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0) {
+        if (t_prefs.group_interval_mins > 0 && (now_mins % t_prefs.group_interval_mins) == 0) {
             the_mesh.sendGroupReport(lat, lon, alt, dist, current_hdop);
             last_report_group_ts = now_mins;
             sent = true;
         }
 
-        if (j_prefs.pvt_interval_mins > 0 && ((now_mins + (j_prefs.group_interval_mins == j_prefs.pvt_interval_mins ? 1 : 0)) % j_prefs.pvt_interval_mins) == 0) {
+        if (t_prefs.pvt_interval_mins > 0 && ((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0) {
             the_mesh.sendPrivateReport(lat, lon, alt, dist, current_hdop);
             last_report_pvt_ts = now_mins;
             sent = true;

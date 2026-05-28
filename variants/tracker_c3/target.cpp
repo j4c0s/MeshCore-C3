@@ -2,7 +2,7 @@
 #include <SPI.h>
 #include "target.h"
 
-JacoSensorBoard board;
+TrackerBoard board;
 
 // Use the standard SPI instance
 // We use RADIOLIB_NC for reset to prevent automatic reset during radio.begin()
