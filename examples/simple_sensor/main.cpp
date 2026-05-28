@@ -76,7 +76,7 @@ void setup() {
   }
   loadJacoPrefs();
 
-  log_ts("--- Jaco Universal Sensor Starting ---");
+  log_ts("--- Jaco Universal Tracker Starting ---");
 
   board.begin();
   if (!radio_init()) {
@@ -95,9 +95,9 @@ void setup() {
   sensors.begin();
   the_mesh.begin(&SPIFFS);
 
-  // Branded Defaults
+  // Tracker Branded Defaults
   if (strlen(the_mesh.getNodePrefs()->node_name) == 0 || strcmp(the_mesh.getNodePrefs()->node_name, "sensor") == 0) {
-     strcpy(the_mesh.getNodePrefs()->node_name, "MeshSensor");
+     strcpy(the_mesh.getNodePrefs()->node_name, "MeshTracker");
   }
   if (strlen(the_mesh.getNodePrefs()->password) == 0 || strcmp(the_mesh.getNodePrefs()->password, "password") == 0) {
      strcpy(the_mesh.getNodePrefs()->password, "123456");
@@ -190,10 +190,11 @@ void loop() {
     if (millis() - last_gps_debug > 5000) {
         last_gps_debug = millis();
         if (loc) {
-            log_ts("[GPS-DEBUG] Uptime: %lus | Sats: %d | HDOP: %.1f | Fix: %s",
+            float current_hdop = loc->getHDOP();
+            log_ts("[GPS-DEBUG] Uptime: %lus | Sats: %d | Acc: ~%.0fm | Fix: %s",
                    (millis() - gps_start_ms) / 1000,
                    (int)loc->satellitesCount(),
-                   loc->getHDOP(),
+                   hdopToMeters(current_hdop),
                    has_basic_fix ? "YES" : "NO");
         }
     }
@@ -202,16 +203,17 @@ void loop() {
       if (!is_gps_stabilizing) {
         is_gps_stabilizing = true;
         gps_fix_acquired_ms = millis();
-        log_ts("[GPS] Fix acquired. Waiting for precision (HDOP < %.1f) or %ds timeout...", TARGET_HDOP, GPS_STABILIZE_TIMEOUT_MS/1000);
+        log_ts("[GPS] Fix acquired. Waiting for precision (<%.0fm) or %ds timeout...", TARGET_ACCURACY_METERS, GPS_STABILIZE_TIMEOUT_MS/1000);
       }
 
       float current_hdop = loc->getHDOP();
-      bool is_precise_enough = (current_hdop <= TARGET_HDOP);
+      float current_acc = hdopToMeters(current_hdop);
+      bool is_precise_enough = (current_acc <= TARGET_ACCURACY_METERS);
       bool is_timed_out = (millis() - gps_fix_acquired_ms > GPS_STABILIZE_TIMEOUT_MS);
 
       if (is_precise_enough || is_timed_out) {
-        if (is_precise_enough) log_ts("[GPS] Target precision reached (HDOP: %.1f).", current_hdop);
-        else log_ts("[GPS] Stabilization timeout. Sending best available fix (HDOP: %.1f).", current_hdop);
+        if (is_precise_enough) log_ts("[GPS] Target precision reached (~%.0fm).", current_acc);
+        else log_ts("[GPS] Stabilization timeout. Sending best available fix (~%.0fm).", current_acc);
 
         double lat = sensors.node_lat;
         double lon = sensors.node_lon;
@@ -235,6 +237,8 @@ void loop() {
         if (!sent) {
             the_mesh.sendGroupReport(lat, lon, alt, dist, current_hdop);
         }
+
+        log_ts("[GPS] Final Fix: %.6f, %.6f. Distance moved: %.1fm. Report sent.", lat, lon, dist);
 
         last_known_lat = lat;
         last_known_lon = lon;

@@ -9,7 +9,7 @@
 #define ON_DEMAND_GPS_DURATION_MS 120000 // 2 minutes stay-awake for GPS
 #define GPS_TIMEOUT_MS 600000          // 10 minutes
 #define GPS_STABILIZE_TIMEOUT_MS 20000 // Max 20s wait for HDOP
-#define TARGET_HDOP 2.5f               // Good precision threshold
+#define TARGET_ACCURACY_METERS 25.0f   // Target accuracy in meters (approx HDOP 5.0)
 
 // State Persistence
 extern double last_known_lat;
@@ -46,6 +46,11 @@ inline double calculateDistance(double lat1, double lon1, double lat2, double lo
     return 6371000.0 * c;
 }
 
+// Convert HDOP to approximate meters
+inline float hdopToMeters(float hdop) {
+    return hdop * 5.0f;
+}
+
 class JacoMesh : public SensorMesh {
 public:
   JacoMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
@@ -78,9 +83,10 @@ public:
     formatAllInaVoltages(ina_info, sizeof(ina_info));
     float temp = getTemperature(TELEM_CHANNEL_SELF);
     float hum = getRelativeHumidity(TELEM_CHANNEL_SELF);
+    float acc = hdopToMeters(hdop);
 
-    snprintf(buf, len, "Pos:%.6f,%.6f Alt:%.1f Dist:%.1fm HDOP:%.1f | %s | ATH:%.1fC/%.1f%%",
-             lat, lon, alt, dist, hdop, ina_info, temp, hum);
+    snprintf(buf, len, "Pos:%.6f,%.6f Alt:%.1f Dist:%.1fm Acc:~%.0fm | %s | ATH:%.1fC/%.1f%%",
+             lat, lon, alt, dist, acc, ina_info, temp, hum);
   }
 
   void sendGroupReport(double lat, double lon, float alt, double dist, float hdop) {
@@ -162,7 +168,6 @@ protected:
 
     if (memcmp(command, "set channel.key ", 16) == 0) {
       mesh::Utils::fromHex(j_prefs.channel_key, 16, &command[16]);
-      // Calculate hash automatically from key (first byte)
       j_prefs.channel_hash = j_prefs.channel_key[0];
       saveJacoPrefs();
       strcpy(reply, "OK - Channel Configured");
@@ -206,7 +211,8 @@ protected:
   }
 
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
-    SensorMesh::onGroupDataRecv(packet, type, channel, data, len);
+    // SensorMesh doesn't override this, so we don't call it.
+    // We can call the base Mesh version if needed.
     if (channel.hash[0] == j_prefs.channel_hash) {
        startGpsOnDemand();
     }
