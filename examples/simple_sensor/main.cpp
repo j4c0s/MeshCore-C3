@@ -26,8 +26,39 @@ RTC_DATA_ATTR bool has_any_gps_fix_ever = false;
 bool is_gps_cycle_active = false;
 uint32_t gps_start_ms = 0;
 uint32_t active_mode_end_ms = 0;
-uint32_t last_report_hour = 0xFFFFFFFF;
-uint32_t last_report_pvt_hour = 0xFFFFFFFF;
+uint32_t last_report_group_ts = 0;
+uint32_t last_report_pvt_ts = 0;
+
+// Universal Configuration Structure
+struct JacoPrefs {
+  uint8_t channel_hash;
+  uint8_t channel_key[16];
+  uint16_t group_interval_mins;
+  uint16_t pvt_interval_mins;
+} j_prefs;
+
+void loadJacoPrefs() {
+  File file = SPIFFS.open("/jaco_prefs", "r");
+  if (file && file.size() == sizeof(j_prefs)) {
+    file.read((uint8_t*)&j_prefs, sizeof(j_prefs));
+    file.close();
+  } else {
+    // Defaults
+    j_prefs.channel_hash = 0x4C;
+    uint8_t def_key[16] = { 0x3e, 0x72, 0x3e, 0x16, 0xeb, 0x4b, 0x25, 0x64, 0xfa, 0x23, 0x5e, 0x9f, 0x81, 0x6d, 0x49, 0x76 };
+    memcpy(j_prefs.channel_key, def_key, 16);
+    j_prefs.group_interval_mins = 60;
+    j_prefs.pvt_interval_mins = 30;
+  }
+}
+
+void saveJacoPrefs() {
+  File file = SPIFFS.open("/jaco_prefs", "w", true);
+  if (file) {
+    file.write((uint8_t*)&j_prefs, sizeof(j_prefs));
+    file.close();
+  }
+}
 
 // Haversine formula to calculate distance in meters
 double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
@@ -95,9 +126,8 @@ public:
 
   void sendGroupReport(double lat, double lon, float alt, double dist) {
     mesh::GroupChannel channel;
-    channel.hash[0] = 0x4C;
-    const uint8_t key[16] = { 0x3e, 0x72, 0x3e, 0x16, 0xeb, 0x4b, 0x25, 0x64, 0xfa, 0x23, 0x5e, 0x9f, 0x81, 0x6d, 0x49, 0x76 };
-    memcpy(channel.secret, key, 16);
+    channel.hash[0] = j_prefs.channel_hash;
+    memcpy(channel.secret, j_prefs.channel_key, 16);
     memset(channel.secret + 16, 0x00, 16);
 
     uint8_t data[MAX_PACKET_PAYLOAD];
@@ -165,6 +195,35 @@ protected:
       sprintf(reply, "INA:%s, ATH:%.1fC/%.1f%%, GPS:%.6f,%.6f", ina_info, temp, hum, last_known_lat, last_known_lon);
       return true;
     }
+
+    // CUSTOM CONFIG COMMANDS
+    if (memcmp(command, "set channel.hash ", 17) == 0) {
+      uint8_t h;
+      mesh::Utils::fromHex(&h, 1, &command[17]);
+      j_prefs.channel_hash = h;
+      saveJacoPrefs();
+      strcpy(reply, "OK - Channel Hash set");
+      return true;
+    }
+    if (memcmp(command, "set channel.key ", 16) == 0) {
+      mesh::Utils::fromHex(j_prefs.channel_key, 16, &command[16]);
+      saveJacoPrefs();
+      strcpy(reply, "OK - Channel Key set");
+      return true;
+    }
+    if (memcmp(command, "set reporting.group ", 20) == 0) {
+      j_prefs.group_interval_mins = atoi(&command[20]);
+      saveJacoPrefs();
+      sprintf(reply, "OK - Group reporting every %d mins", j_prefs.group_interval_mins);
+      return true;
+    }
+    if (memcmp(command, "set reporting.pvt ", 18) == 0) {
+      j_prefs.pvt_interval_mins = atoi(&command[18]);
+      saveJacoPrefs();
+      sprintf(reply, "OK - Private reporting every %d mins", j_prefs.pvt_interval_mins);
+      return true;
+    }
+
     return false;
   }
 
@@ -175,7 +234,7 @@ protected:
       gps_start_ms = millis();
       digitalWrite(PIN_GPS_ENABLE, HIGH);
       auto loc = sensors.getLocationProvider();
-      if (loc) loc->syncTime(); // Clear NMEA buffer
+      if (loc) loc->syncTime();
       log_ts("[PWR] GPS triggered on demand.");
     }
   }
@@ -189,7 +248,7 @@ protected:
 
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
     SensorMesh::onGroupDataRecv(packet, type, channel, data, len);
-    if (channel.hash[0] == 0x4C) {
+    if (channel.hash[0] == j_prefs.channel_hash) {
        startGpsOnDemand();
     }
   }
@@ -203,7 +262,13 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  log_ts("--- Jaco Sensor Starting ---");
+  // Initialize file system first to load prefs
+  if(!SPIFFS.begin(true)){
+     Serial.println("SPIFFS Mount Failed");
+  }
+  loadJacoPrefs();
+
+  log_ts("--- Jaco Universal Sensor Starting ---");
 
   board.begin();
   if (!radio_init()) {
@@ -212,9 +277,8 @@ void setup() {
   }
 
   fast_rng.begin(radio_get_rng_seed());
-  SPIFFS.begin(true);
-  IdentityStore store(SPIFFS, "/identity");
 
+  IdentityStore store(SPIFFS, "/identity");
   if (!store.load("_main", the_mesh.self_id)) {
     the_mesh.self_id = radio_new_identity();
     store.save("_main", the_mesh.self_id);
@@ -222,6 +286,15 @@ void setup() {
 
   sensors.begin();
   the_mesh.begin(&SPIFFS);
+
+  // Universal Defaults for new devices
+  if (strlen(the_mesh.getNodePrefs()->node_name) == 0 || strcmp(the_mesh.getNodePrefs()->node_name, "sensor") == 0) {
+     strcpy(the_mesh.getNodePrefs()->node_name, "MeshSensor");
+  }
+  if (strlen(the_mesh.getNodePrefs()->password) == 0 || strcmp(the_mesh.getNodePrefs()->password, "password") == 0) {
+     strcpy(the_mesh.getNodePrefs()->password, "123456");
+  }
+
   the_mesh.getNodePrefs()->powersaving_enabled = 1;
 
   CayenneLPP dummy(64);
@@ -232,7 +305,7 @@ void setup() {
   gps_start_ms = millis();
   digitalWrite(PIN_GPS_ENABLE, HIGH);
   auto loc = sensors.getLocationProvider();
-  if (loc) loc->syncTime(); // Clear NMEA buffer
+  if (loc) loc->syncTime();
   log_ts("[PWR] Initializing sensors and GPS.");
 }
 
@@ -255,6 +328,8 @@ void loop() {
           is_gps_cycle_active = true;
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_ENABLE, HIGH);
+          auto loc = sensors.getLocationProvider();
+          if (loc) loc->syncTime();
         }
       }
     } else {
@@ -268,27 +343,34 @@ void loop() {
   rtc_clock.tick();
 
   uint32_t now_utc = rtc_clock.getCurrentTime();
-  uint32_t current_hour = now_utc / 3600;
-  uint32_t current_minute = (now_utc / 60) % 60;
 
-  if (now_utc > 1704067200 && current_minute == 0 && current_hour != last_report_hour) {
-    if (!is_gps_cycle_active) {
-      log_ts("[PWR] Hourly cycle start.");
-      is_gps_cycle_active = true;
-      gps_start_ms = millis();
-      digitalWrite(PIN_GPS_ENABLE, HIGH);
-      auto loc = sensors.getLocationProvider();
-      if (loc) loc->syncTime(); // Clear NMEA buffer
-    }
-  } else if (now_utc > 1704067200 && current_minute == 30 && current_hour != last_report_pvt_hour) {
-     if (!is_gps_cycle_active) {
-      log_ts("[PWR] Mid-hour cycle start.");
-      is_gps_cycle_active = true;
-      gps_start_ms = millis();
-      digitalWrite(PIN_GPS_ENABLE, HIGH);
-      auto loc = sensors.getLocationProvider();
-      if (loc) loc->syncTime(); // Clear NMEA buffer
-    }
+  // REPORTING LOGIC
+  if (now_utc > 1704067200) {
+      uint32_t now_mins = now_utc / 60;
+
+      // Group Report Interval
+      if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0 && now_mins != last_report_group_ts) {
+        if (!is_gps_cycle_active) {
+          log_ts("[PWR] Scheduled Group Report cycle.");
+          is_gps_cycle_active = true;
+          gps_start_ms = millis();
+          digitalWrite(PIN_GPS_ENABLE, HIGH);
+          auto loc = sensors.getLocationProvider();
+          if (loc) loc->syncTime();
+        }
+      }
+
+      // Private Report Interval (offset by 1 min if intervals overlap)
+      if (j_prefs.pvt_interval_mins > 0 && ((now_mins + (j_prefs.group_interval_mins == j_prefs.pvt_interval_mins ? 1 : 0)) % j_prefs.pvt_interval_mins) == 0 && now_mins != last_report_pvt_ts) {
+        if (!is_gps_cycle_active) {
+          log_ts("[PWR] Scheduled Private Report cycle.");
+          is_gps_cycle_active = true;
+          gps_start_ms = millis();
+          digitalWrite(PIN_GPS_ENABLE, HIGH);
+          auto loc = sensors.getLocationProvider();
+          if (loc) loc->syncTime();
+        }
+      }
   }
 
   if (is_gps_cycle_active) {
@@ -309,13 +391,24 @@ void loop() {
         float alt = sensors.node_altitude;
         double dist = has_any_gps_fix_ever ? calculateDistance(last_known_lat, last_known_lon, lat, lon) : 0;
 
-        if (current_minute == 0) {
+        uint32_t now_mins = now_utc / 60;
+
+        // Decide what to send
+        bool sent = false;
+        if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0) {
             the_mesh.sendGroupReport(lat, lon, alt, dist);
-            last_report_hour = current_hour;
-        } else if (current_minute == 30) {
+            last_report_group_ts = now_mins;
+            sent = true;
+        }
+
+        if (j_prefs.pvt_interval_mins > 0 && ((now_mins + (j_prefs.group_interval_mins == j_prefs.pvt_interval_mins ? 1 : 0)) % j_prefs.pvt_interval_mins) == 0) {
             the_mesh.sendPrivateReport(lat, lon, alt, dist);
-            last_report_pvt_hour = current_hour;
-        } else {
+            last_report_pvt_ts = now_mins;
+            sent = true;
+        }
+
+        if (!sent) {
+            // Boot or on-demand
             the_mesh.sendGroupReport(lat, lon, alt, dist);
         }
 
