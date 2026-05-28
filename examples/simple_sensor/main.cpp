@@ -1,41 +1,28 @@
-#include "SensorMesh.h"
-#include <math.h>
-#include <stdarg.h>
+#include "JacoMesh.h"
 #include <SPIFFS.h>
-#include <RTClib.h>
 #include "target.h"
+#include <RTClib.h>
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
 #endif
 
-#define PIN_GPS_ENABLE 1
-#define ACTIVE_MODE_DURATION_MS 300000  // 5 minutes
-#define ON_DEMAND_GPS_DURATION_MS 120000 // 2 minutes stay-awake for GPS
-#define GPS_TIMEOUT_MS 600000          // 10 minutes
-#define GPS_STABILIZE_MS 10000         // 10 seconds stabilization after fix
-
-// Persistent state in RTC memory
-RTC_DATA_ATTR double last_known_lat = 0.0;
-RTC_DATA_ATTR double last_known_lon = 0.0;
-RTC_DATA_ATTR float last_known_alt = 0.0;
-RTC_DATA_ATTR bool has_any_gps_fix_ever = false;
-
-// Power and Report State
+// Power State
 bool is_gps_cycle_active = false;
 uint32_t gps_start_ms = 0;
 uint32_t active_mode_end_ms = 0;
 uint32_t last_report_group_ts = 0;
 uint32_t last_report_pvt_ts = 0;
 
-// Universal Configuration Structure
-struct JacoPrefs {
-  uint8_t channel_hash;
-  uint8_t channel_key[16];
-  uint16_t group_interval_mins;
-  uint16_t pvt_interval_mins;
-} j_prefs;
+// GPS Persistence
+RTC_DATA_ATTR double last_known_lat = 0.0;
+RTC_DATA_ATTR double last_known_lon = 0.0;
+RTC_DATA_ATTR float last_known_alt = 0.0;
+RTC_DATA_ATTR bool has_any_gps_fix_ever = false;
+
+// Global Prefs
+JacoPrefs j_prefs;
 
 void loadJacoPrefs() {
   File file = SPIFFS.open("/jaco_prefs", "r");
@@ -43,12 +30,12 @@ void loadJacoPrefs() {
     file.read((uint8_t*)&j_prefs, sizeof(j_prefs));
     file.close();
   } else {
-    // Defaults
+    // Defaults: Disabled reporting
     j_prefs.channel_hash = 0x4C;
     uint8_t def_key[16] = { 0x3e, 0x72, 0x3e, 0x16, 0xeb, 0x4b, 0x25, 0x64, 0xfa, 0x23, 0x5e, 0x9f, 0x81, 0x6d, 0x49, 0x76 };
     memcpy(j_prefs.channel_key, def_key, 16);
-    j_prefs.group_interval_mins = 60;
-    j_prefs.pvt_interval_mins = 30;
+    j_prefs.group_interval_mins = 0;
+    j_prefs.pvt_interval_mins = 0;
   }
 }
 
@@ -60,18 +47,7 @@ void saveJacoPrefs() {
   }
 }
 
-// Haversine formula to calculate distance in meters
-double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
-    double dLat = (lat2 - lat1) * M_PI / 180.0;
-    double dLon = (lon2 - lon1) * M_PI / 180.0;
-    lat1 = (lat1) * M_PI / 180.0;
-    lat2 = (lat2) * M_PI / 180.0;
-    double a = pow(sin(dLat / 2), 2) + pow(sin(dLon / 2), 2) * cos(lat1) * cos(lat2);
-    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
-    return 6371000.0 * c;
-}
-
-// Global logger with timestamp
+// Global logger
 void log_ts(const char* format, ...) {
     char time_buf[16];
     uint32_t now = rtc_clock.getCurrentTime();
@@ -87,178 +63,9 @@ void log_ts(const char* format, ...) {
     Serial.println(log_buf);
 }
 
-class MyMesh : public SensorMesh {
-public:
-  MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
-     : SensorMesh(board, radio, ms, rng, rtc, tables),
-       battery_data(12*24, 5*60)
-  {
-  }
-
-  float findInaVoltage() {
-    for (uint8_t ch = 1; ch <= 4; ch++) {
-      float v = getVoltage(ch);
-      if (v > 0.1f) return v;
-    }
-    return 0.0f;
-  }
-
-  void formatAllInaVoltages(char* buf, size_t len) {
-    char* dp = buf;
-    int ofs = 0;
-    for (uint8_t ch = 1; ch <= 4; ch++) {
-      float v = getVoltage(ch);
-      if (v > 0.1f) {
-        ofs += snprintf(dp + ofs, len - ofs, "CH%d:%.2fV ", ch, v);
-      }
-    }
-  }
-
-  void buildReport(char* buf, size_t len, double lat, double lon, float alt, double dist) {
-    char ina_info[64] = {0};
-    formatAllInaVoltages(ina_info, sizeof(ina_info));
-    float temp = getTemperature(TELEM_CHANNEL_SELF);
-    float hum = getRelativeHumidity(TELEM_CHANNEL_SELF);
-
-    snprintf(buf, len, "Pos:%.6f,%.6f Alt:%.1f Dist:%.1fm | %s | ATH:%.1fC/%.1f%%",
-             lat, lon, alt, dist, ina_info, temp, hum);
-  }
-
-  void sendGroupReport(double lat, double lon, float alt, double dist) {
-    mesh::GroupChannel channel;
-    channel.hash[0] = j_prefs.channel_hash;
-    memcpy(channel.secret, j_prefs.channel_key, 16);
-    memset(channel.secret + 16, 0x00, 16);
-
-    uint8_t data[MAX_PACKET_PAYLOAD];
-    uint32_t ts = getRTCClock()->getCurrentTime();
-    memcpy(data, &ts, 4);
-    data[4] = 0x00;
-
-    char report[160];
-    buildReport(report, sizeof(report), lat, lon, alt, dist);
-    int len = 5 + snprintf((char*)&data[5], sizeof(data) - 5, "%s: %s", getNodeName(), report);
-
-    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
-    if (pkt) {
-      sendFlood(pkt, (uint32_t)0, (uint8_t)3);
-      log_ts("[MESH] Group report sent.");
-    }
-  }
-
-  void sendPrivateReport(double lat, double lon, float alt, double dist) {
-    auto contact = acl.getClientByIdx(0);
-    if (contact && contact->permissions != 0) {
-      uint8_t data[MAX_PACKET_PAYLOAD];
-      uint32_t ts = getRTCClock()->getCurrentTimeUnique();
-      memcpy(data, &ts, 4);
-      data[4] = (TXT_TYPE_PLAIN << 2);
-
-      char report[160];
-      buildReport(report, sizeof(report), lat, lon, alt, dist);
-      int tlen = snprintf((char*)&data[5], sizeof(data) - 5, "[PVT] %s: %s", getNodeName(), report);
-
-      auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, contact->id, contact->shared_secret, data, 5 + tlen);
-      if (pkt) {
-        if (contact->out_path_len != OUT_PATH_UNKNOWN) {
-          sendDirect(pkt, contact->out_path, contact->out_path_len);
-        } else {
-          sendFlood(pkt, (uint32_t)0, (uint8_t)3);
-        }
-        log_ts("[MESH] Private report sent to Admin.");
-      }
-    }
-  }
-
-protected:
-  Trigger low_batt, critical_batt;
-  TimeSeriesData battery_data;
-
-  void onSensorDataRead() override {
-    float v = findInaVoltage();
-    if (v > 0.1f) {
-      battery_data.recordData(getRTCClock(), v);
-    }
-  }
-
-  int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
-    battery_data.calcMinMaxAvg(getRTCClock(), start_secs_ago, end_secs_ago, &dest[0], TELEM_CHANNEL_SELF, LPP_VOLTAGE);
-    return 1;
-  }
-
-  bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
-    if (strcmp(command, "status") == 0) {
-      char ina_info[64] = {0};
-      formatAllInaVoltages(ina_info, sizeof(ina_info));
-      float temp = getTemperature(TELEM_CHANNEL_SELF);
-      float hum = getRelativeHumidity(TELEM_CHANNEL_SELF);
-      sprintf(reply, "INA:%s, ATH:%.1fC/%.1f%%, GPS:%.6f,%.6f", ina_info, temp, hum, last_known_lat, last_known_lon);
-      return true;
-    }
-
-    // CUSTOM CONFIG COMMANDS
-    if (memcmp(command, "set channel.hash ", 17) == 0) {
-      uint8_t h;
-      mesh::Utils::fromHex(&h, 1, &command[17]);
-      j_prefs.channel_hash = h;
-      saveJacoPrefs();
-      strcpy(reply, "OK - Channel Hash set");
-      return true;
-    }
-    if (memcmp(command, "set channel.key ", 16) == 0) {
-      mesh::Utils::fromHex(j_prefs.channel_key, 16, &command[16]);
-      saveJacoPrefs();
-      strcpy(reply, "OK - Channel Key set");
-      return true;
-    }
-    if (memcmp(command, "set reporting.group ", 20) == 0) {
-      j_prefs.group_interval_mins = atoi(&command[20]);
-      saveJacoPrefs();
-      sprintf(reply, "OK - Group reporting every %d mins", j_prefs.group_interval_mins);
-      return true;
-    }
-    if (memcmp(command, "set reporting.pvt ", 18) == 0) {
-      j_prefs.pvt_interval_mins = atoi(&command[18]);
-      saveJacoPrefs();
-      sprintf(reply, "OK - Private reporting every %d mins", j_prefs.pvt_interval_mins);
-      return true;
-    }
-
-    return false;
-  }
-
-  void startGpsOnDemand() {
-    active_mode_end_ms = millis() + ON_DEMAND_GPS_DURATION_MS;
-    if (!is_gps_cycle_active) {
-      is_gps_cycle_active = true;
-      gps_start_ms = millis();
-      digitalWrite(PIN_GPS_ENABLE, HIGH);
-      auto loc = sensors.getLocationProvider();
-      if (loc) {
-        loc->syncTime();
-        log_ts("[PWR] GPS powered ON (On-demand). NMEA buffer cleared.");
-      }
-    }
-  }
-
-  void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override {
-    SensorMesh::onPeerDataRecv(packet, type, sender_idx, secret, data, len);
-    if (type == PAYLOAD_TYPE_REQ || type == PAYLOAD_TYPE_TXT_MSG) {
-       startGpsOnDemand();
-    }
-  }
-
-  void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
-    SensorMesh::onGroupDataRecv(packet, type, channel, data, len);
-    if (channel.hash[0] == j_prefs.channel_hash) {
-       startGpsOnDemand();
-    }
-  }
-};
-
 StdRNG fast_rng;
 SimpleMeshTables tables;
-MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
+JacoMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 
 void setup() {
   Serial.begin(115200);
@@ -288,6 +95,7 @@ void setup() {
   sensors.begin();
   the_mesh.begin(&SPIFFS);
 
+  // Branded Defaults
   if (strlen(the_mesh.getNodePrefs()->node_name) == 0 || strcmp(the_mesh.getNodePrefs()->node_name, "sensor") == 0) {
      strcpy(the_mesh.getNodePrefs()->node_name, "MeshSensor");
   }
@@ -300,12 +108,13 @@ void setup() {
   CayenneLPP dummy(64);
   sensors.querySensors(0xFF, dummy);
 
+  // Initial GPS cycle on boot
   is_gps_cycle_active = true;
   gps_start_ms = millis();
   digitalWrite(PIN_GPS_ENABLE, HIGH);
   auto loc = sensors.getLocationProvider();
   if (loc) loc->syncTime();
-  log_ts("[PWR] Initializing GPS for boot cycle. NMEA buffer cleared.");
+  log_ts("[PWR] Initializing GPS for boot cycle.");
 }
 
 void loop() {
@@ -328,10 +137,7 @@ void loop() {
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_ENABLE, HIGH);
           auto loc = sensors.getLocationProvider();
-          if (loc) {
-            loc->syncTime();
-            log_ts("[PWR] GPS powered ON (Console activity). NMEA buffer cleared.");
-          }
+          if (loc) loc->syncTime();
         }
       }
     } else {
@@ -351,7 +157,7 @@ void loop() {
 
       if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0 && now_mins != last_report_group_ts) {
         if (!is_gps_cycle_active) {
-          log_ts("[PWR] Scheduled Group Report cycle. Powering ON GPS.");
+          log_ts("[PWR] Scheduled Group Report cycle.");
           is_gps_cycle_active = true;
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_ENABLE, HIGH);
@@ -362,7 +168,7 @@ void loop() {
 
       if (j_prefs.pvt_interval_mins > 0 && ((now_mins + (j_prefs.group_interval_mins == j_prefs.pvt_interval_mins ? 1 : 0)) % j_prefs.pvt_interval_mins) == 0 && now_mins != last_report_pvt_ts) {
         if (!is_gps_cycle_active) {
-          log_ts("[PWR] Scheduled Private Report cycle. Powering ON GPS.");
+          log_ts("[PWR] Scheduled Private Report cycle.");
           is_gps_cycle_active = true;
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_ENABLE, HIGH);
@@ -378,36 +184,35 @@ void loop() {
     static uint32_t last_gps_debug = 0;
 
     auto loc = sensors.getLocationProvider();
-    bool has_valid_fix = (loc && loc->isValid() && sensors.node_lat != 0.0);
+    bool has_basic_fix = (loc && loc->isValid() && sensors.node_lat != 0.0);
 
-    // Periodic GPS status debug (every 5s)
+    // Periodic GPS status debug
     if (millis() - last_gps_debug > 5000) {
         last_gps_debug = millis();
         if (loc) {
-            log_ts("[GPS-DEBUG] Uptime: %lus | Sats: %d | Fix: %s | Lat: %.6f Lon: %.6f",
+            log_ts("[GPS-DEBUG] Uptime: %lus | Sats: %d | HDOP: %.1f | Fix: %s",
                    (millis() - gps_start_ms) / 1000,
                    (int)loc->satellitesCount(),
-                   has_valid_fix ? "YES" : "NO",
-                   sensors.node_lat, sensors.node_lon);
+                   loc->getHDOP(),
+                   has_basic_fix ? "YES" : "NO");
         }
     }
 
-    if (has_valid_fix) {
+    if (has_basic_fix) {
       if (!is_gps_stabilizing) {
         is_gps_stabilizing = true;
         gps_fix_acquired_ms = millis();
-        log_ts("[GPS] Fix acquired. Stabilizing for 10s...");
+        log_ts("[GPS] Fix acquired. Waiting for precision (HDOP < %.1f) or %ds timeout...", TARGET_HDOP, GPS_STABILIZE_TIMEOUT_MS/1000);
       }
 
-      // Log coordinates during stabilization
-      static uint32_t last_stabilize_log = 0;
-      if (millis() - last_stabilize_log > 2000) {
-          last_stabilize_log = millis();
-          log_ts("[GPS-STABILIZE] Current: %.6f, %.6f (Time left: %lus)",
-                 sensors.node_lat, sensors.node_lon, (GPS_STABILIZE_MS - (millis() - gps_fix_acquired_ms)) / 1000);
-      }
+      float current_hdop = loc->getHDOP();
+      bool is_precise_enough = (current_hdop <= TARGET_HDOP);
+      bool is_timed_out = (millis() - gps_fix_acquired_ms > GPS_STABILIZE_TIMEOUT_MS);
 
-      if (millis() - gps_fix_acquired_ms > GPS_STABILIZE_MS) {
+      if (is_precise_enough || is_timed_out) {
+        if (is_precise_enough) log_ts("[GPS] Target precision reached (HDOP: %.1f).", current_hdop);
+        else log_ts("[GPS] Stabilization timeout. Sending best available fix (HDOP: %.1f).", current_hdop);
+
         double lat = sensors.node_lat;
         double lon = sensors.node_lon;
         float alt = sensors.node_altitude;
@@ -416,22 +221,20 @@ void loop() {
         uint32_t now_mins = now_utc / 60;
         bool sent = false;
         if (j_prefs.group_interval_mins > 0 && (now_mins % j_prefs.group_interval_mins) == 0) {
-            the_mesh.sendGroupReport(lat, lon, alt, dist);
+            the_mesh.sendGroupReport(lat, lon, alt, dist, current_hdop);
             last_report_group_ts = now_mins;
             sent = true;
         }
 
         if (j_prefs.pvt_interval_mins > 0 && ((now_mins + (j_prefs.group_interval_mins == j_prefs.pvt_interval_mins ? 1 : 0)) % j_prefs.pvt_interval_mins) == 0) {
-            the_mesh.sendPrivateReport(lat, lon, alt, dist);
+            the_mesh.sendPrivateReport(lat, lon, alt, dist, current_hdop);
             last_report_pvt_ts = now_mins;
             sent = true;
         }
 
         if (!sent) {
-            the_mesh.sendGroupReport(lat, lon, alt, dist);
+            the_mesh.sendGroupReport(lat, lon, alt, dist, current_hdop);
         }
-
-        log_ts("[GPS] Final Fix: %.6f, %.6f. Distance moved: %.1fm. Report sent.", lat, lon, dist);
 
         last_known_lat = lat;
         last_known_lon = lon;
@@ -441,14 +244,13 @@ void loop() {
         is_gps_cycle_active = false;
         is_gps_stabilizing = false;
         digitalWrite(PIN_GPS_ENABLE, LOW);
-        log_ts("[PWR] GPS powered OFF.");
+        log_ts("[PWR] Cycle complete. GPS OFF.");
       }
     } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
       log_ts("[GPS] Timeout waiting for fix. Giving up.");
       is_gps_cycle_active = false;
       is_gps_stabilizing = false;
       digitalWrite(PIN_GPS_ENABLE, LOW);
-      log_ts("[PWR] GPS powered OFF.");
     }
   }
 }

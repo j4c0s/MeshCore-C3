@@ -120,6 +120,7 @@ public :
         return alt;
     }
     long satellitesCount() override { return nmea.getNumSatellites(); }
+    float getHDOP() override { return (float)nmea.getHDOP() / 10.0f; }
     bool isValid() override { return nmea.isValid(); }
 
     long getTimestamp() override { 
