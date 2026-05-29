@@ -113,8 +113,11 @@ public:
           TransportKey keys[2];
           int n = region_map.getTransportKeysFor(*region, keys, 2);
           if (n > 0) {
-            sendFlood(pkt, (uint16_t*)keys, (uint32_t)0, (uint8_t)3);
-            log_ts("[MESH] Group report sent (Scope: %s).", t_prefs.channel_scope);
+            uint16_t codes[2];
+            codes[0] = keys[0].calcTransportCode(pkt);
+            codes[1] = (n > 1) ? keys[1].calcTransportCode(pkt) : 0;
+            sendFlood(pkt, codes, (uint32_t)0, (uint8_t)3);
+            log_ts("[MESH] Group report sent (Scope: %s, Codes: %04X/%04X).", t_prefs.channel_scope, codes[0], codes[1]);
             return;
           }
         }
