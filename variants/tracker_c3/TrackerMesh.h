@@ -181,9 +181,12 @@ protected:
 
     if (memcmp(command, "set channel.key ", 16) == 0) {
       mesh::Utils::fromHex(t_prefs.channel_key, 16, &command[16]);
-      t_prefs.channel_hash = t_prefs.channel_key[0];
+      // Calculate hash correctly: first byte of SHA256(key)
+      uint8_t full_hash[32];
+      mesh::Utils::sha256(full_hash, 32, t_prefs.channel_key, 16);
+      t_prefs.channel_hash = full_hash[0];
       saveTrackerPrefs();
-      strcpy(reply, "OK - Channel Configured");
+      sprintf(reply, "OK - Channel Configured (Hash: %02X)", t_prefs.channel_hash);
       return true;
     }
     if (memcmp(command, "set channel.scope ", 18) == 0) {
