@@ -29,7 +29,7 @@ struct TrackerPrefs {
   uint8_t channel_key[16];
   uint16_t group_interval_mins;
   uint16_t pvt_interval_mins;
-  char channel_scope[32]; // Scope for the Group Channel
+  char channel_scope[32];
 } extern t_prefs;
 
 void loadTrackerPrefs();
@@ -107,21 +107,20 @@ public:
 
     auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, len);
     if (pkt) {
-      uint32_t d = 0;
-      if (strlen(t_prefs.channel_scope) > 0) {
+      if (strlen(t_prefs.channel_scope) > 0 && strcmp(t_prefs.channel_scope, "none") != 0) {
         auto region = region_map.findByName(t_prefs.channel_scope);
         if (region) {
           TransportKey keys[2];
           int n = region_map.getTransportKeysFor(*region, keys, 2);
           if (n > 0) {
-            sendFlood(pkt, (uint16_t*)keys, d, 3);
+            sendFlood(pkt, (uint16_t*)keys, (uint32_t)0, (uint8_t)3);
             log_ts("[MESH] Group report sent (Scope: %s).", t_prefs.channel_scope);
             return;
           }
         }
       }
       sendFlood(pkt, (uint32_t)0, (uint8_t)3);
-      log_ts("[MESH] Group report sent (Default Flood).");
+      log_ts("[MESH] Group report sent (Global Flood).");
     }
   }
 
@@ -176,7 +175,7 @@ protected:
     }
 
     if (strcmp(command, "tracker help") == 0) {
-      strcpy(reply, "Commands: set channel.key {hex}, set channel.scope {name}, set reporting.group {mins}, set reporting.pvt {mins}, status");
+      strcpy(reply, "set channel.key {hex}, set channel.scope {name|none}, set reporting.group {mins}, set reporting.pvt {mins}, status");
       return true;
     }
 
@@ -190,7 +189,7 @@ protected:
     if (memcmp(command, "set channel.scope ", 18) == 0) {
       strcpy(t_prefs.channel_scope, &command[18]);
       saveTrackerPrefs();
-      sprintf(reply, "OK - Group channel scope set to: %s", t_prefs.channel_scope);
+      sprintf(reply, "OK - Group channel scope: %s", t_prefs.channel_scope);
       return true;
     }
     if (memcmp(command, "set reporting.group ", 20) == 0) {
