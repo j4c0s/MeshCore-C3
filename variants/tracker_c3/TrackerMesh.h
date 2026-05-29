@@ -193,9 +193,19 @@ protected:
       return true;
     }
     if (memcmp(command, "set channel.scope ", 18) == 0) {
-      strcpy(t_prefs.channel_scope, &command[18]);
+      const char* name = &command[18];
+      if (strcmp(name, "none") == 0) {
+          t_prefs.channel_scope[0] = 0;
+      } else {
+          StrHelper::strncpy(t_prefs.channel_scope, name, sizeof(t_prefs.channel_scope));
+          // Auto-create region if missing so transport keys can be generated
+          if (region_map.findByName(t_prefs.channel_scope) == NULL) {
+              region_map.putRegion(t_prefs.channel_scope, 0); // parent 0 = wildcard
+              region_map.save(_fs); // Persist regions so it stays after reboot
+          }
+      }
       saveTrackerPrefs();
-      sprintf(reply, "OK - Group channel scope: %s", t_prefs.channel_scope);
+      sprintf(reply, "OK - Group channel scope: %s", t_prefs.channel_scope[0] ? t_prefs.channel_scope : "none");
       return true;
     }
     if (memcmp(command, "set reporting.group ", 20) == 0) {
