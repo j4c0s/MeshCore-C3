@@ -36,7 +36,7 @@ void loadTrackerPrefs() {
     memcpy(t_prefs.channel_key, def_key, 16);
     t_prefs.group_interval_mins = 0;
     t_prefs.pvt_interval_mins = 0;
-    memset(t_prefs.pvt_scope, 0, sizeof(t_prefs.pvt_scope));
+    memset(t_prefs.channel_scope, 0, sizeof(t_prefs.channel_scope));
   }
 }
 

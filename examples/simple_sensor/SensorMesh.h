@@ -141,6 +141,7 @@ private:
   unsigned long dirty_contacts_expiry;
   CayenneLPP telemetry;
   TransportKeyStore key_store;
+protected:
   RegionMap region_map;
   TransportKey default_scope;
   uint32_t last_read_time;
