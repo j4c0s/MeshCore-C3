@@ -132,8 +132,8 @@ protected:
   void sendAckTo(const ClientInfo& dest, uint32_t ack_hash, uint8_t path_hash_size=1);
 protected:
   ClientACL  acl;
-private:
   FILESYSTEM* _fs;
+private:
   unsigned long next_local_advert, next_flood_advert;
   NodePrefs _prefs;
   CommonCLI _cli;
