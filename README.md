@@ -45,6 +45,7 @@ For developers;
   - [Simple Room Server](./examples/simple_room_server) - A simple BBS server for shared Posts.
   - [Simple Secure Chat](./examples/simple_secure_chat) - Secure terminal based text communication between devices.
   - [Simple Sensor](./examples/simple_sensor) - Remote sensor node with telemetry and alerting.
+  - [MeshTracker](./variants/tracker_c3) - High-precision GPS tracking with precision-based reporting and power management.
 
 The Simple Secure Chat example can be interacted with through the Serial Monitor in Visual Studio Code, or with a Serial USB Terminal on Android.
 

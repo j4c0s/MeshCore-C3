@@ -34,7 +34,6 @@ struct TrackerPrefs {
 
 void loadTrackerPrefs();
 void saveTrackerPrefs();
-void log_ts(const char* format, ...);
 
 // Haversine formula
 inline double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
@@ -117,17 +116,11 @@ public:
             codes[0] = keys[0].calcTransportCode(pkt);
             codes[1] = (n > 1) ? keys[1].calcTransportCode(pkt) : 0;
             sendFlood(pkt, codes, (uint32_t)0, (uint8_t)3);
-            log_ts("[MESH] Scoped Report (Region: %s, ID: %02X, Codes: %04X/%04X).", t_prefs.channel_scope, region->id, codes[0], codes[1]);
             return;
-          } else {
-            log_ts("[MESH-WARN] Region found but no keys! Falling back to Global.");
           }
-        } else {
-          log_ts("[MESH-WARN] Scope '%s' not found in RegionMap! Falling back to Global.", t_prefs.channel_scope);
         }
       }
       sendFlood(pkt, (uint32_t)0, (uint8_t)3);
-      log_ts("[MESH] Global Group report sent.");
     }
   }
 
@@ -150,7 +143,6 @@ public:
         } else {
           sendFlood(pkt, (uint32_t)0, (uint8_t)3);
         }
-        log_ts("[MESH] Private report sent to Admin.");
       }
     }
   }
@@ -199,14 +191,12 @@ protected:
       const char* name = &command[18];
       if (strcmp(name, "none") == 0) {
           t_prefs.channel_scope[0] = 0;
-          log_ts("[CLI] Regional scope disabled.");
       } else {
           StrHelper::strncpy(t_prefs.channel_scope, name, sizeof(t_prefs.channel_scope));
           if (region_map.findByName(t_prefs.channel_scope) == NULL) {
               auto r = region_map.putRegion(t_prefs.channel_scope, 0);
               if (r) {
                 region_map.save(_fs);
-                log_ts("[CLI] Created new region: %s (ID: %02X)", t_prefs.channel_scope, r->id);
               }
           }
       }
@@ -239,7 +229,6 @@ protected:
       auto loc = sensors.getLocationProvider();
       if (loc) {
         loc->syncTime();
-        log_ts("[PWR] GPS powered ON (On-demand). NMEA buffer cleared.");
       }
     }
   }
