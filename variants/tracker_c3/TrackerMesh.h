@@ -117,13 +117,17 @@ public:
             codes[0] = keys[0].calcTransportCode(pkt);
             codes[1] = (n > 1) ? keys[1].calcTransportCode(pkt) : 0;
             sendFlood(pkt, codes, (uint32_t)0, (uint8_t)3);
-            log_ts("[MESH] Group report sent (Scope: %s, Codes: %04X/%04X).", t_prefs.channel_scope, codes[0], codes[1]);
+            log_ts("[MESH] Scoped Report (Region: %s, ID: %02X, Codes: %04X/%04X).", t_prefs.channel_scope, region->id, codes[0], codes[1]);
             return;
+          } else {
+            log_ts("[MESH-WARN] Region found but no keys! Falling back to Global.");
           }
+        } else {
+          log_ts("[MESH-WARN] Scope '%s' not found in RegionMap! Falling back to Global.", t_prefs.channel_scope);
         }
       }
       sendFlood(pkt, (uint32_t)0, (uint8_t)3);
-      log_ts("[MESH] Group report sent (Global Flood).");
+      log_ts("[MESH] Global Group report sent.");
     }
   }
 
@@ -184,7 +188,6 @@ protected:
 
     if (memcmp(command, "set channel.key ", 16) == 0) {
       mesh::Utils::fromHex(t_prefs.channel_key, 16, &command[16]);
-      // Calculate hash correctly: first byte of SHA256(key)
       uint8_t full_hash[32];
       mesh::Utils::sha256(full_hash, 32, t_prefs.channel_key, 16);
       t_prefs.channel_hash = full_hash[0];
@@ -196,12 +199,15 @@ protected:
       const char* name = &command[18];
       if (strcmp(name, "none") == 0) {
           t_prefs.channel_scope[0] = 0;
+          log_ts("[CLI] Regional scope disabled.");
       } else {
           StrHelper::strncpy(t_prefs.channel_scope, name, sizeof(t_prefs.channel_scope));
-          // Auto-create region if missing so transport keys can be generated
           if (region_map.findByName(t_prefs.channel_scope) == NULL) {
-              region_map.putRegion(t_prefs.channel_scope, 0); // parent 0 = wildcard
-              region_map.save(_fs); // Persist regions so it stays after reboot
+              auto r = region_map.putRegion(t_prefs.channel_scope, 0);
+              if (r) {
+                region_map.save(_fs);
+                log_ts("[CLI] Created new region: %s (ID: %02X)", t_prefs.channel_scope, r->id);
+              }
           }
       }
       saveTrackerPrefs();
