@@ -10,6 +10,7 @@
 
 // Power State
 bool is_gps_cycle_active = false;
+bool pwr_log_done = false;
 uint32_t gps_start_ms = 0;
 uint32_t active_mode_end_ms = 0;
 uint32_t last_report_group_ts = 0;
@@ -135,6 +136,7 @@ void loop() {
         if (reply[0]) log_ts(" -> %s", reply);
         command_buf[0] = 0; clen = 0;
 
+        pwr_log_done = false;
         active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
         if (!is_gps_cycle_active) {
           is_gps_cycle_active = true;
@@ -191,6 +193,7 @@ void loop() {
   }
 
   if (is_gps_cycle_active) {
+    pwr_log_done = false;
     static uint32_t gps_fix_acquired_ms = 0;
     static bool is_gps_stabilizing = false;
     static uint32_t last_gps_debug = 0;
@@ -292,11 +295,14 @@ void loop() {
       uint32_t sleep_secs = min(wait_group, wait_pvt);
       if (sleep_secs < 10) sleep_secs = 60; // minimum 1 min sleep if very close to next interval
 
-      // Verbose sleep debug
-      uint32_t wake_epoch = rtc_clock.getCurrentTime() + sleep_secs;
-      DateTime wake_dt(wake_epoch);
-      log_ts("[PWR] Cycle finished. Planning sleep for %lu seconds.", sleep_secs);
-      log_ts("[PWR] Planned wake-up at: %02d:%02d:%02d UTC (Epoch: %lu)", wake_dt.hour(), wake_dt.minute(), wake_dt.second(), wake_epoch);
+      if (!pwr_log_done) {
+          // Verbose sleep debug
+          uint32_t wake_epoch = rtc_clock.getCurrentTime() + sleep_secs;
+          DateTime wake_dt(wake_epoch);
+          log_ts("[PWR] Cycle finished. Planning sleep for %lu seconds.", sleep_secs);
+          log_ts("[PWR] Planned wake-up at: %02d:%02d:%02d UTC (Epoch: %lu)", wake_dt.hour(), wake_dt.minute(), wake_dt.second(), wake_epoch);
+          pwr_log_done = true;
+      }
 
       Serial.flush();
       delay(100);
