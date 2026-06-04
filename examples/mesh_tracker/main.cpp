@@ -94,6 +94,7 @@ void setup() {
   sensors.querySensors(0xFF, dummy);
 
   // Initial GPS cycle on boot
+  Serial.println("Boot: Starting initial GPS fix cycle...");
   is_gps_cycle_active = true;
   gps_start_ms = millis();
   digitalWrite(PIN_GPS_EN, HIGH);
@@ -114,8 +115,9 @@ void loop() {
       if (clen > 0) {
         command_buf[clen] = 0;
         char reply[160] = {0};
+        Serial.printf("> %s\n", command_buf);
         the_mesh.handleCommand(0, command_buf, reply);
-        if (reply[0]) Serial.println(reply);
+        if (reply[0]) Serial.printf("Reply: %s\n", reply);
         command_buf[0] = 0; clen = 0;
 
         pwr_log_done = false;
@@ -139,44 +141,62 @@ void loop() {
   rtc_clock.tick();
 
   uint32_t now_utc = rtc_clock.getCurrentTime();
+  static bool time_was_synced = false;
 
   // REPORTING LOGIC
   // 1704067200 = 1 Jan 2024
-  // 1715770351 = 15 May 2024 (ESP32RTCClock default)
-  // We want to wait until we get a real time sync from GPS
-  // GPS sync usually sets time to something current (2025+)
-  // We check for a time well after the default boot time to be sure we have a sync.
-  if (now_utc > 1735689600) {  // 1 Jan 2025
+  // Wait until we get a real time sync from GPS
+  if (now_utc > 1704067200) {
+      if (!time_was_synced) {
+        DateTime dt = DateTime(now_utc);
+        Serial.printf("Time synced! UTC: %02d:%02d:%02d\n", dt.hour(), dt.minute(), dt.second());
+        time_was_synced = true;
+      }
       uint32_t now_mins = now_utc / 60;
 
-      if (t_prefs.group_interval_mins > 0 && (now_mins % t_prefs.group_interval_mins) == 0 && now_mins != last_report_group_ts) {
+      // If interval is set but we haven't reported yet, OR if it's time for next report
+      if (t_prefs.group_interval_mins > 0 && ((now_mins % t_prefs.group_interval_mins) == 0 || last_report_group_ts == 0) && now_mins != last_report_group_ts) {
         if (!is_gps_cycle_active) {
+          Serial.printf("Starting scheduled group report cycle (Int: %u mins)\n", t_prefs.group_interval_mins);
           is_gps_cycle_active = true;
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_EN, HIGH);
           auto loc = sensors.getLocationProvider();
           if (loc) loc->syncTime();
         }
+        if (last_report_group_ts == 0) last_report_group_ts = 1; // dummy value to prevent repeat before fix
       }
 
-      if (t_prefs.pvt_interval_mins > 0 && ((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0 && now_mins != last_report_pvt_ts) {
+      if (t_prefs.pvt_interval_mins > 0 && (((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0 || last_report_pvt_ts == 0) && now_mins != last_report_pvt_ts) {
         if (!is_gps_cycle_active) {
+          Serial.printf("Starting scheduled private report cycle (Int: %u mins)\n", t_prefs.pvt_interval_mins);
           is_gps_cycle_active = true;
           gps_start_ms = millis();
           digitalWrite(PIN_GPS_EN, HIGH);
           auto loc = sensors.getLocationProvider();
           if (loc) loc->syncTime();
         }
+        if (last_report_pvt_ts == 0) last_report_pvt_ts = 1; // dummy value to prevent repeat
       }
   }
 
   if (is_gps_cycle_active) {
     pwr_log_done = false;
     static uint32_t gps_fix_acquired_ms = 0;
+    static uint32_t last_status_log = 0;
     static bool is_gps_stabilizing = false;
 
     auto loc = sensors.getLocationProvider();
     bool has_basic_fix = (loc && loc->isValid() && sensors.node_lat != 0.0);
+
+    if (millis() - last_status_log > 5000) {
+      last_status_log = millis();
+      if (loc) {
+        Serial.printf("GPS Status: %lus, Sats: %d, Fix: %s\n", (millis() - gps_start_ms)/1000, loc->satellitesCount(), has_basic_fix?"YES":"NO");
+      } else {
+        Serial.println("GPS Error: No Provider");
+      }
+    }
 
     if (has_basic_fix) {
       if (!is_gps_stabilizing) {
@@ -188,6 +208,12 @@ void loop() {
       float current_acc = hdopToMeters(current_hdop);
       bool is_precise_enough = (current_acc <= TARGET_ACCURACY_METERS);
       bool is_timed_out = (millis() - gps_fix_acquired_ms > GPS_STABILIZE_TIMEOUT_MS);
+
+      static uint32_t last_acc_log = 0;
+      if (millis() - last_acc_log > 2000) {
+        last_acc_log = millis();
+        Serial.printf("Stabilizing: %lum, Target: %lum\n", (uint32_t)current_acc, (uint32_t)TARGET_ACCURACY_METERS);
+      }
 
       if (is_precise_enough || is_timed_out) {
         double lat = sensors.node_lat;

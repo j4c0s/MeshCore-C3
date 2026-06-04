@@ -171,7 +171,7 @@ protected:
   }
 
   bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
-    if (strcmp(command, "status") == 0) {
+    if (StrHelper::startsWith(command, "status")) {
       char ina_info[64] = {0};
       formatAllInaVoltages(ina_info, sizeof(ina_info));
       float temp = getTemperature(TELEM_CHANNEL_SELF);
@@ -180,12 +180,12 @@ protected:
       return true;
     }
 
-    if (strcmp(command, "tracker help") == 0) {
+    if (StrHelper::startsWith(command, "tracker help")) {
       strcpy(reply, "set channel.key {hex}, set channel.scope {name|none}, set reporting.group {mins}, set reporting.pvt {mins}, status");
       return true;
     }
 
-    if (memcmp(command, "set channel.key ", 16) == 0) {
+    if (StrHelper::startsWith(command, "set channel.key ")) {
       mesh::Utils::fromHex(t_prefs.channel_key, 16, &command[16]);
       uint8_t full_hash[32];
       mesh::Utils::sha256(full_hash, 32, t_prefs.channel_key, 16);
@@ -194,7 +194,7 @@ protected:
       sprintf(reply, "OK - Channel Configured (Hash: %02X)", t_prefs.channel_hash);
       return true;
     }
-    if (memcmp(command, "set channel.scope ", 18) == 0) {
+    if (StrHelper::startsWith(command, "set channel.scope ")) {
       const char* name = &command[18];
       if (strcmp(name, "none") == 0) {
           t_prefs.channel_scope[0] = 0;
@@ -211,13 +211,13 @@ protected:
       sprintf(reply, "OK - Group channel scope: %s", t_prefs.channel_scope[0] ? t_prefs.channel_scope : "none");
       return true;
     }
-    if (memcmp(command, "set reporting.group ", 20) == 0) {
+    if (StrHelper::startsWith(command, "set reporting.group ")) {
       t_prefs.group_interval_mins = atoi(&command[20]);
       saveTrackerPrefs();
       sprintf(reply, "OK - Group reporting every %d mins", t_prefs.group_interval_mins);
       return true;
     }
-    if (memcmp(command, "set reporting.pvt ", 18) == 0) {
+    if (StrHelper::startsWith(command, "set reporting.pvt ")) {
       t_prefs.pvt_interval_mins = atoi(&command[18]);
       saveTrackerPrefs();
       sprintf(reply, "OK - Private reporting every %d mins", t_prefs.pvt_interval_mins);

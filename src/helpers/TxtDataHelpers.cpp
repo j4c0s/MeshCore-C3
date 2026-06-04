@@ -172,3 +172,10 @@ uint32_t StrHelper::fromHex(const char* src) {
   }
   return n;
 }
+
+bool StrHelper::startsWith(const char* str, const char* prefix) {
+  while (*prefix) {
+    if (*str++ != *prefix++) return false;
+  }
+  return true;
+}
