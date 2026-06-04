@@ -59,7 +59,7 @@ public:
   }
 
   float findInaVoltage() {
-    for (uint8_t ch = 1; ch <= 4; ch++) {
+    for (uint8_t ch = 2; ch <= 4; ch++) {
       float v = getVoltage(ch);
       if (v > 0.1f) return v;
     }
@@ -69,11 +69,11 @@ public:
   void formatAllInaData(char* buf, size_t len) {
     char* dp = buf;
     int ofs = 0;
-    for (uint8_t ch = 1; ch <= 4; ch++) {
+    for (uint8_t ch = 2; ch <= 4; ch++) {
       float v = getVoltage(ch);
       float a = getCurrent(ch);
       if (v > 0.1f) {
-        ofs += snprintf(dp + ofs, len - ofs, "CH%d:%.2fV/%.0fmA ", ch, v, a * 1000.0f);
+        ofs += snprintf(dp + ofs, len - ofs, "CH%d:%.2fV/%.0fmA ", ch-1, v, a * 1000.0f);
       }
     }
   }
@@ -87,8 +87,8 @@ public:
     // Voltages in V, Currents in mA
     int ofs = snprintf(buf, len, "$TRK,%.6f,%.6f,%.1f,%.1f,%.0f", lat, lon, alt, dist, acc);
 
-    // INA3221 usually populates channels starting from 1 in EnvironmentSensorManager
-    for (uint8_t ch = 1; ch <= 3; ch++) {
+    // INA3221 usually populates channels starting from 2 in EnvironmentSensorManager
+    for (uint8_t ch = 2; ch <= 4; ch++) {
       float v = getVoltage(ch);
       float a = getCurrent(ch);
       ofs += snprintf(buf + ofs, len - ofs, ",%.2f,%.0f", v, a * 1000.0f);

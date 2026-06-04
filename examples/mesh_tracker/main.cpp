@@ -151,6 +151,8 @@ void loop() {
   the_mesh.loop();
   rtc_clock.tick();
 
+  static uint32_t last_manual_read = 0;
+
   uint32_t now_utc = rtc_clock.getCurrentTime();
   static bool time_was_synced = false;
 
@@ -171,6 +173,11 @@ void loop() {
            if (!is_gps_cycle_active) {
              Serial.printf("Reporting Trigger (Group): Now=%u, Last=%u, Int=%u\n", now_mins, last_report_group_ts, t_prefs.group_interval_mins);
              last_report_group_ts = now_mins;
+
+             // Trigger manual sensor read before cycle
+             CayenneLPP dummy(64);
+             sensors.querySensors(0xFF, dummy);
+
              is_gps_cycle_active = true;
              gps_start_ms = millis();
              digitalWrite(PIN_GPS_EN, HIGH);
@@ -188,6 +195,11 @@ void loop() {
            if (!is_gps_cycle_active) {
              Serial.printf("Reporting Trigger (Private): Now=%u, Last=%u, Int=%u\n", now_mins, last_report_pvt_ts, t_prefs.pvt_interval_mins);
              last_report_pvt_ts = now_mins;
+
+             // Trigger manual sensor read before cycle
+             CayenneLPP dummy(64);
+             sensors.querySensors(0xFF, dummy);
+
              is_gps_cycle_active = true;
              gps_start_ms = millis();
              digitalWrite(PIN_GPS_EN, HIGH);

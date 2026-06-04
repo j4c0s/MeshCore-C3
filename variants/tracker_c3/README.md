@@ -35,9 +35,8 @@ A professional, high-precision LoRa Mesh tracker built on the **MeshCore** frame
 | | GPIO 9 | SCL |
 
 ### Sensors Supported
-- **INA3221**: Triple-channel voltage monitor (Address 0x40).
+- **INA3221**: Triple-channel voltage/current monitor (Address 0x42).
 - **AHT10**: Temperature and Humidity.
-- **DS3231**: High-precision RTC (Address 0x68).
 
 ## 🚀 Getting Started
 

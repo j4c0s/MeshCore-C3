@@ -924,6 +924,7 @@ void SensorMesh::loop() {
     telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
     // query other sensors -- target specific
     sensors.querySensors(0xFF, telemetry);  // allow all telemetry permissions
+    MESH_DEBUG_PRINTLN("Sensors read: %d bytes into telemetry buffer", telemetry.getSize());
 
     onSensorDataRead();
 
