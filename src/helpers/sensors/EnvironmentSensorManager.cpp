@@ -268,10 +268,11 @@ bool EnvironmentSensorManager::begin() {
   #if ENV_INCLUDE_INA3221
   if (INA3221.begin(TELEM_INA3221_ADDRESS, TELEM_WIRE)) {
     MESH_DEBUG_PRINTLN("Found INA3221 at address: %02X", TELEM_INA3221_ADDRESS);
-    MESH_DEBUG_PRINTLN("%04X %04X", INA3221.getDieID(), INA3221.getManufacturerID());
+    Serial.printf("INA3221: OK (Addr: 0x%02X, ID: %04X)\n", TELEM_INA3221_ADDRESS, INA3221.getDieID());
 
     for(int i = 0; i < 3; i++) {
       INA3221.setShuntResistance(i, TELEM_INA3221_SHUNT_VALUE);
+      INA3221.setChannelEnabled(i, true);
     }
     INA3221_initialized = true;
   } else {

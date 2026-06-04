@@ -54,6 +54,16 @@ StdRNG fast_rng;
 SimpleMeshTables tables;
 TrackerMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 
+void scanI2C() {
+  Serial.println("Scanning I2C...");
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("I2C device at 0x%02X\n", addr);
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -63,6 +73,7 @@ void setup() {
   }
 
   board.begin();
+  scanI2C();
   if (!radio_init()) {
     Serial.println("Radio init failed!");
     while(1);
@@ -155,28 +166,38 @@ void loop() {
       uint32_t now_mins = now_utc / 60;
 
       // If interval is set but we haven't reported yet, OR if it's time for next report
-      if (t_prefs.group_interval_mins > 0 && ((now_mins % t_prefs.group_interval_mins) == 0 || last_report_group_ts == 0) && now_mins != last_report_group_ts) {
-        if (!is_gps_cycle_active) {
-          Serial.printf("Starting scheduled group report cycle (Int: %u mins)\n", t_prefs.group_interval_mins);
-          is_gps_cycle_active = true;
-          gps_start_ms = millis();
-          digitalWrite(PIN_GPS_EN, HIGH);
-          auto loc = sensors.getLocationProvider();
-          if (loc) loc->syncTime();
+      if (t_prefs.group_interval_mins > 0 && now_mins != last_report_group_ts) {
+        if ((now_mins % t_prefs.group_interval_mins) == 0 || last_report_group_ts == 0) {
+           if (!is_gps_cycle_active) {
+             Serial.printf("Reporting Trigger (Group): Now=%u, Last=%u, Int=%u\n", now_mins, last_report_group_ts, t_prefs.group_interval_mins);
+             last_report_group_ts = now_mins;
+             is_gps_cycle_active = true;
+             gps_start_ms = millis();
+             digitalWrite(PIN_GPS_EN, HIGH);
+             auto loc = sensors.getLocationProvider();
+             if (loc) {
+               loc->syncTime();
+               while (Serial1.available()) Serial1.read();
+             }
+           }
         }
-        if (last_report_group_ts == 0) last_report_group_ts = 1; // dummy value to prevent repeat before fix
       }
 
-      if (t_prefs.pvt_interval_mins > 0 && (((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0 || last_report_pvt_ts == 0) && now_mins != last_report_pvt_ts) {
-        if (!is_gps_cycle_active) {
-          Serial.printf("Starting scheduled private report cycle (Int: %u mins)\n", t_prefs.pvt_interval_mins);
-          is_gps_cycle_active = true;
-          gps_start_ms = millis();
-          digitalWrite(PIN_GPS_EN, HIGH);
-          auto loc = sensors.getLocationProvider();
-          if (loc) loc->syncTime();
+      if (t_prefs.pvt_interval_mins > 0 && now_mins != last_report_pvt_ts) {
+        if (((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0 || last_report_pvt_ts == 0) {
+           if (!is_gps_cycle_active) {
+             Serial.printf("Reporting Trigger (Private): Now=%u, Last=%u, Int=%u\n", now_mins, last_report_pvt_ts, t_prefs.pvt_interval_mins);
+             last_report_pvt_ts = now_mins;
+             is_gps_cycle_active = true;
+             gps_start_ms = millis();
+             digitalWrite(PIN_GPS_EN, HIGH);
+             auto loc = sensors.getLocationProvider();
+             if (loc) {
+               loc->syncTime();
+               while (Serial1.available()) Serial1.read();
+             }
+           }
         }
-        if (last_report_pvt_ts == 0) last_report_pvt_ts = 1; // dummy value to prevent repeat
       }
   }
 
@@ -223,6 +244,7 @@ void loop() {
 
         uint32_t now_mins = now_utc / 60;
         bool sent = false;
+
         if (t_prefs.group_interval_mins > 0 && (now_mins % t_prefs.group_interval_mins) == 0) {
             the_mesh.sendGroupReport(lat, lon, alt, dist, current_hdop);
             last_report_group_ts = now_mins;

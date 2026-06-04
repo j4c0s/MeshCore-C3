@@ -66,13 +66,14 @@ public:
     return 0.0f;
   }
 
-  void formatAllInaVoltages(char* buf, size_t len) {
+  void formatAllInaData(char* buf, size_t len) {
     char* dp = buf;
     int ofs = 0;
     for (uint8_t ch = 1; ch <= 4; ch++) {
       float v = getVoltage(ch);
+      float a = getCurrent(ch);
       if (v > 0.1f) {
-        ofs += snprintf(dp + ofs, len - ofs, "CH%d:%.2fV ", ch, v);
+        ofs += snprintf(dp + ofs, len - ofs, "CH%d:%.2fV/%.0fmA ", ch, v, a * 1000.0f);
       }
     }
   }
@@ -86,10 +87,10 @@ public:
     // Voltages in V, Currents in mA
     int ofs = snprintf(buf, len, "$TRK,%.6f,%.6f,%.1f,%.1f,%.0f", lat, lon, alt, dist, acc);
 
+    // INA3221 usually populates channels starting from 1 in EnvironmentSensorManager
     for (uint8_t ch = 1; ch <= 3; ch++) {
       float v = getVoltage(ch);
-      float a = getCurrent(ch); // Current in mA as per library? Let's check CayenneLPP/EnvironmentSensorManager
-      // In LPP_CURRENT, it is usually Amps. Let's assume Amps and convert to mA.
+      float a = getCurrent(ch);
       ofs += snprintf(buf + ofs, len - ofs, ",%.2f,%.0f", v, a * 1000.0f);
     }
 
@@ -172,8 +173,8 @@ protected:
 
   bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
     if (StrHelper::startsWith(command, "status")) {
-      char ina_info[64] = {0};
-      formatAllInaVoltages(ina_info, sizeof(ina_info));
+      char ina_info[100] = {0};
+      formatAllInaData(ina_info, sizeof(ina_info));
       float temp = getTemperature(TELEM_CHANNEL_SELF);
       float hum = getRelativeHumidity(TELEM_CHANNEL_SELF);
       sprintf(reply, "INA:%s, ATH:%.1fC/%.1f%%, GPS:%.6f,%.6f", ina_info, temp, hum, last_known_lat, last_known_lon);
