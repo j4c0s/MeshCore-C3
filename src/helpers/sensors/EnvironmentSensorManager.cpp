@@ -272,7 +272,6 @@ bool EnvironmentSensorManager::begin() {
 
     for(int i = 0; i < 3; i++) {
       INA3221.setShuntResistance(i, TELEM_INA3221_SHUNT_VALUE);
-      INA3221.setChannelEnabled(i, true);
     }
     INA3221_initialized = true;
   } else {
