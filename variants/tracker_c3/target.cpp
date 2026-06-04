@@ -11,8 +11,7 @@ RADIO_CLASS radio = RADIO_CLASS(new Module(P_LORA_NSS, P_LORA_DIO_1, RADIOLIB_NC
 
 WRAPPER_CLASS radio_driver(radio, board);
 
-ESP32RTCClock fallback_clock;
-AutoDiscoverRTCClock rtc_clock(fallback_clock);
+ESP32RTCClock rtc_clock;
 
 #if ENV_INCLUDE_GPS
   #include <helpers/sensors/MicroNMEALocationProvider.h>
@@ -23,14 +22,12 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 #endif
 
 bool radio_init() {
-  fallback_clock.begin();
+  rtc_clock.begin();
 
-  // Initialize I2C with specified pins before RTC and sensors
+  // Initialize I2C with specified pins before sensors
   #if defined(PIN_BOARD_SDA) && defined(PIN_BOARD_SCL)
     Wire.begin(PIN_BOARD_SDA, PIN_BOARD_SCL);
   #endif
-
-  rtc_clock.begin(Wire);
 
 
   // Initialize GPS serial port

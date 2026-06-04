@@ -11,7 +11,7 @@
 extern TrackerBoard board;
 extern RADIO_CLASS radio;
 extern WRAPPER_CLASS radio_driver;
-extern AutoDiscoverRTCClock rtc_clock;
+extern ESP32RTCClock rtc_clock;
 extern EnvironmentSensorManager sensors;
 
 bool radio_init();

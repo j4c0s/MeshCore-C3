@@ -4,7 +4,6 @@
 #include <math.h>
 #include <stdarg.h>
 
-#define PIN_GPS_ENABLE 1
 #define ACTIVE_MODE_DURATION_MS 300000  // 5 minutes
 #define ON_DEMAND_GPS_DURATION_MS 120000 // 2 minutes stay-awake for GPS
 #define GPS_TIMEOUT_MS 600000          // 10 minutes
@@ -79,14 +78,22 @@ public:
   }
 
   void buildReport(char* buf, size_t len, double lat, double lon, float alt, double dist, float hdop) {
-    char ina_info[64] = {0};
-    formatAllInaVoltages(ina_info, sizeof(ina_info));
     float temp = getTemperature(TELEM_CHANNEL_SELF);
     float hum = getRelativeHumidity(TELEM_CHANNEL_SELF);
     float acc = hdopToMeters(hdop);
 
-    snprintf(buf, len, "Pos:%.6f,%.6f Alt:%.1f Dist:%.1fm Acc:~%.0fm | %s | ATH:%.1fC/%.1f%%",
-             lat, lon, alt, dist, acc, ina_info, temp, hum);
+    // Format: $TRK,lat,lon,alt,dist,acc,V1,A1,V2,A2,V3,A3,temp,hum
+    // Voltages in V, Currents in mA
+    int ofs = snprintf(buf, len, "$TRK,%.6f,%.6f,%.1f,%.1f,%.0f", lat, lon, alt, dist, acc);
+
+    for (uint8_t ch = 1; ch <= 3; ch++) {
+      float v = getVoltage(ch);
+      float a = getCurrent(ch); // Current in mA as per library? Let's check CayenneLPP/EnvironmentSensorManager
+      // In LPP_CURRENT, it is usually Amps. Let's assume Amps and convert to mA.
+      ofs += snprintf(buf + ofs, len - ofs, ",%.2f,%.0f", v, a * 1000.0f);
+    }
+
+    snprintf(buf + ofs, len - ofs, ",%.1f,%.1f", temp, hum);
   }
 
   void sendGroupReport(double lat, double lon, float alt, double dist, float hdop) {
@@ -225,7 +232,7 @@ protected:
     if (!is_gps_cycle_active) {
       is_gps_cycle_active = true;
       gps_start_ms = millis();
-      digitalWrite(PIN_GPS_ENABLE, HIGH);
+      digitalWrite(PIN_GPS_EN, HIGH);
       auto loc = sensors.getLocationProvider();
       if (loc) {
         loc->syncTime();

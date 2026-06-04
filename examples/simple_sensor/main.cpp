@@ -1,253 +1,150 @@
-#include "TrackerMesh.h"
-#include <SPIFFS.h>
-#include "target.h"
-#include <RTClib.h>
+#include "SensorMesh.h"
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
 #endif
 
-// Power State
-bool is_gps_cycle_active = false;
-bool pwr_log_done = false;
-uint32_t gps_start_ms = 0;
-uint32_t active_mode_end_ms = 0;
-uint32_t last_report_group_ts = 0;
-uint32_t last_report_pvt_ts = 0;
-
-// GPS Persistence
-RTC_DATA_ATTR double last_known_lat = 0.0;
-RTC_DATA_ATTR double last_known_lon = 0.0;
-RTC_DATA_ATTR float last_known_alt = 0.0;
-RTC_DATA_ATTR bool has_any_gps_fix_ever = false;
-
-// Global Prefs
-TrackerPrefs t_prefs;
-
-void loadTrackerPrefs() {
-  File file = SPIFFS.open("/tracker_prefs", "r");
-  if (file && file.size() == sizeof(t_prefs)) {
-    file.read((uint8_t*)&t_prefs, sizeof(t_prefs));
-    file.close();
-  } else {
-    // Defaults: Disabled reporting
-    t_prefs.channel_hash = 0x4C;
-    uint8_t def_key[16] = { 0x3e, 0x72, 0x3e, 0x16, 0xeb, 0x4b, 0x25, 0x64, 0xfa, 0x23, 0x5e, 0x9f, 0x81, 0x6d, 0x49, 0x76 };
-    memcpy(t_prefs.channel_key, def_key, 16);
-    t_prefs.group_interval_mins = 0;
-    t_prefs.pvt_interval_mins = 0;
-    memset(t_prefs.channel_scope, 0, sizeof(t_prefs.channel_scope));
+class MyMesh : public SensorMesh {
+public:
+  MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
+     : SensorMesh(board, radio, ms, rng, rtc, tables),
+       battery_data(12*24, 5*60)    // 24 hours worth of battery data, every 5 minutes
+  {
   }
-}
 
-void saveTrackerPrefs() {
-  File file = SPIFFS.open("/tracker_prefs", "w", true);
-  if (file) {
-    file.write((uint8_t*)&t_prefs, sizeof(t_prefs));
-    file.close();
+protected:
+  /* ========================== custom logic here ========================== */
+  Trigger low_batt, critical_batt;
+  TimeSeriesData  battery_data;
+
+  void onSensorDataRead() override {
+    float batt_voltage = getVoltage(TELEM_CHANNEL_SELF);
+
+    battery_data.recordData(getRTCClock(), batt_voltage);   // record battery
+    alertIf(batt_voltage < 3.4f, critical_batt, HIGH_PRI_ALERT, "Battery is critical!");
+    alertIf(batt_voltage < 3.6f, low_batt, LOW_PRI_ALERT, "Battery is low");
   }
-}
 
+  int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
+    battery_data.calcMinMaxAvg(getRTCClock(), start_secs_ago, end_secs_ago, &dest[0], TELEM_CHANNEL_SELF, LPP_VOLTAGE);
+    return 1;
+  }
+
+  bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
+    if (strcmp(command, "magic") == 0) {    // example 'custom' command handling
+      strcpy(reply, "**Magic now done**");
+      return true;   // handled
+    }
+    return false;  // not handled
+  }
+  /* ======================================================================= */
+};
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
-TrackerMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
+
+MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
+
+void halt() {
+  while (1) ;
+}
+
+static char command[160];
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  if(!SPIFFS.begin(true)){
-     Serial.println("SPIFFS Mount Failed");
-  }
-
   board.begin();
-  if (!radio_init()) {
-    Serial.println("Radio init failed!");
-    while(1);
-  }
 
-  loadTrackerPrefs();
+#ifdef DISPLAY_CLASS
+  if (display.begin()) {
+    display.startFrame();
+    display.print("Please wait...");
+    display.endFrame();
+  }
+#endif
+
+  if (!radio_init()) { halt(); }
+
   fast_rng.begin(radio_get_rng_seed());
 
+  FILESYSTEM* fs;
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  InternalFS.begin();
+  fs = &InternalFS;
+  IdentityStore store(InternalFS, "");
+#elif defined(ESP32)
+  SPIFFS.begin(true);
+  fs = &SPIFFS;
   IdentityStore store(SPIFFS, "/identity");
+#elif defined(RP2040_PLATFORM)
+  LittleFS.begin();
+  fs = &LittleFS;
+  IdentityStore store(LittleFS, "/identity");
+  store.begin();
+#else
+  #error "need to define filesystem"
+#endif
   if (!store.load("_main", the_mesh.self_id)) {
-    the_mesh.self_id = radio_new_identity();
+    MESH_DEBUG_PRINTLN("Generating new keypair");
+    the_mesh.self_id = radio_new_identity();   // create new random identity
+    int count = 0;
+    while (count < 10 && (the_mesh.self_id.pub_key[0] == 0x00 || the_mesh.self_id.pub_key[0] == 0xFF)) {  // reserved id hashes
+      the_mesh.self_id = radio_new_identity(); count++;
+    }
     store.save("_main", the_mesh.self_id);
   }
 
+  Serial.print("Sensor ID: ");
+  mesh::Utils::printHex(Serial, the_mesh.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
+
+  command[0] = 0;
+
   sensors.begin();
-  the_mesh.begin(&SPIFFS);
 
-  // Tracker Branded Defaults
-  if (strlen(the_mesh.getNodePrefs()->node_name) == 0 || strcmp(the_mesh.getNodePrefs()->node_name, "sensor") == 0) {
-     strcpy(the_mesh.getNodePrefs()->node_name, "MeshTracker");
-  }
-  if (strlen(the_mesh.getNodePrefs()->password) == 0 || strcmp(the_mesh.getNodePrefs()->password, "password") == 0) {
-     strcpy(the_mesh.getNodePrefs()->password, "123456");
-  }
+  the_mesh.begin(fs);
 
-  the_mesh.getNodePrefs()->powersaving_enabled = 1;
+#ifdef DISPLAY_CLASS
+  ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
+#endif
 
-  CayenneLPP dummy(64);
-  sensors.querySensors(0xFF, dummy);
-
-  // Initial GPS cycle on boot
-  is_gps_cycle_active = true;
-  gps_start_ms = millis();
-  digitalWrite(PIN_GPS_ENABLE, HIGH);
-  auto loc = sensors.getLocationProvider();
-  if (loc) loc->syncTime();
+  // send out initial zero hop Advertisement to the mesh
+#if ENABLE_ADVERT_ON_BOOT == 1
+  the_mesh.sendSelfAdvertisement(16000, false);
+#endif
 }
 
 void loop() {
-  static char command_buf[160];
-  int clen = strlen(command_buf);
-  while (Serial.available() && clen < sizeof(command_buf) - 1) {
+  int len = strlen(command);
+  while (Serial.available() && len < sizeof(command)-1) {
     char c = Serial.read();
-    if (c == '\r' || c == '\n') {
-      if (clen > 0) {
-        command_buf[clen] = 0;
-        char reply[160] = {0};
-        the_mesh.handleCommand(0, command_buf, reply);
-        if (reply[0]) Serial.println(reply);
-        command_buf[0] = 0; clen = 0;
-
-        pwr_log_done = false;
-        active_mode_end_ms = millis() + ACTIVE_MODE_DURATION_MS;
-        if (!is_gps_cycle_active) {
-          is_gps_cycle_active = true;
-          gps_start_ms = millis();
-          digitalWrite(PIN_GPS_ENABLE, HIGH);
-          auto loc = sensors.getLocationProvider();
-          if (loc) loc->syncTime();
-        }
-      }
-    } else {
-      command_buf[clen++] = c;
-      command_buf[clen] = 0;
+    if (c != '\n') {
+      command[len++] = c;
+      command[len] = 0;
     }
+    Serial.print(c);
+  }
+  if (len == sizeof(command)-1) {  // command buffer full
+    command[sizeof(command)-1] = '\r';
   }
 
-  sensors.loop();
+  if (len > 0 && command[len - 1] == '\r') {  // received complete line
+    command[len - 1] = 0;  // replace newline with C string null terminator
+    char reply[160];
+    the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
+    if (reply[0]) {
+      Serial.print("  -> "); Serial.println(reply);
+    }
+
+    command[0] = 0;  // reset command buffer
+  }
+
   the_mesh.loop();
+  sensors.loop();
+#ifdef DISPLAY_CLASS
+  ui_task.loop();
+#endif
   rtc_clock.tick();
-
-  uint32_t now_utc = rtc_clock.getCurrentTime();
-
-  // REPORTING LOGIC
-  if (now_utc > 1704067200) {
-      uint32_t now_mins = now_utc / 60;
-
-      if (t_prefs.group_interval_mins > 0 && (now_mins % t_prefs.group_interval_mins) == 0 && now_mins != last_report_group_ts) {
-        if (!is_gps_cycle_active) {
-          is_gps_cycle_active = true;
-          gps_start_ms = millis();
-          digitalWrite(PIN_GPS_ENABLE, HIGH);
-          auto loc = sensors.getLocationProvider();
-          if (loc) loc->syncTime();
-        }
-      }
-
-      if (t_prefs.pvt_interval_mins > 0 && ((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0 && now_mins != last_report_pvt_ts) {
-        if (!is_gps_cycle_active) {
-          is_gps_cycle_active = true;
-          gps_start_ms = millis();
-          digitalWrite(PIN_GPS_ENABLE, HIGH);
-          auto loc = sensors.getLocationProvider();
-          if (loc) loc->syncTime();
-        }
-      }
-  }
-
-  if (is_gps_cycle_active) {
-    pwr_log_done = false;
-    static uint32_t gps_fix_acquired_ms = 0;
-    static bool is_gps_stabilizing = false;
-
-    auto loc = sensors.getLocationProvider();
-    bool has_basic_fix = (loc && loc->isValid() && sensors.node_lat != 0.0);
-
-    if (has_basic_fix) {
-      if (!is_gps_stabilizing) {
-        is_gps_stabilizing = true;
-        gps_fix_acquired_ms = millis();
-      }
-
-      float current_hdop = loc->getHDOP();
-      float current_acc = hdopToMeters(current_hdop);
-      bool is_precise_enough = (current_acc <= TARGET_ACCURACY_METERS);
-      bool is_timed_out = (millis() - gps_fix_acquired_ms > GPS_STABILIZE_TIMEOUT_MS);
-
-      if (is_precise_enough || is_timed_out) {
-        double lat = sensors.node_lat;
-        double lon = sensors.node_lon;
-        float alt = sensors.node_altitude;
-        double dist = has_any_gps_fix_ever ? calculateDistance(last_known_lat, last_known_lon, lat, lon) : 0;
-
-        uint32_t now_mins = now_utc / 60;
-        bool sent = false;
-        if (t_prefs.group_interval_mins > 0 && (now_mins % t_prefs.group_interval_mins) == 0) {
-            the_mesh.sendGroupReport(lat, lon, alt, dist, current_hdop);
-            last_report_group_ts = now_mins;
-            sent = true;
-        }
-
-        if (t_prefs.pvt_interval_mins > 0 && ((now_mins + (t_prefs.group_interval_mins == t_prefs.pvt_interval_mins ? 1 : 0)) % t_prefs.pvt_interval_mins) == 0) {
-            the_mesh.sendPrivateReport(lat, lon, alt, dist, current_hdop);
-            last_report_pvt_ts = now_mins;
-            sent = true;
-        }
-
-        if (!sent) {
-            the_mesh.sendGroupReport(lat, lon, alt, dist, current_hdop);
-        }
-
-        last_known_lat = lat;
-        last_known_lon = lon;
-        last_known_alt = alt;
-        has_any_gps_fix_ever = true;
-
-        is_gps_cycle_active = false;
-        is_gps_stabilizing = false;
-        digitalWrite(PIN_GPS_ENABLE, LOW);
-      }
-    } else if (millis() - gps_start_ms > GPS_TIMEOUT_MS) {
-      is_gps_cycle_active = false;
-      is_gps_stabilizing = false;
-      digitalWrite(PIN_GPS_ENABLE, LOW);
-    }
-  }
-
-  // POWERSAVING - Determine next sleep duration
-  if (!is_gps_cycle_active && (active_mode_end_ms == 0 || millis() > active_mode_end_ms)) {
-      // Logic for calculating next required wake-up
-      uint32_t wait_group = 3600; // default 1h
-      uint32_t wait_pvt = 3600;
-
-      if (t_prefs.group_interval_mins > 0) {
-          uint32_t now_mins = rtc_clock.getCurrentTime() / 60;
-          uint32_t mins_to_next = t_prefs.group_interval_mins - (now_mins % t_prefs.group_interval_mins);
-          wait_group = mins_to_next * 60;
-      }
-      if (t_prefs.pvt_interval_mins > 0) {
-          uint32_t now_mins = rtc_clock.getCurrentTime() / 60;
-          uint32_t mins_to_next = t_prefs.pvt_interval_mins - (now_mins % t_prefs.pvt_interval_mins);
-          wait_pvt = mins_to_next * 60;
-      }
-
-      uint32_t sleep_secs = min(wait_group, wait_pvt);
-      if (sleep_secs < 10) sleep_secs = 60; // minimum 1 min sleep if very close to next interval
-
-      pwr_log_done = true;
-
-      Serial.flush();
-      delay(100);
-      radio.getIrqFlags();
-
-      // IMPORTANT: In light sleep (powersaving_enabled=1), MeshCore::loop() handles sleep automatically.
-      // But we set the internal 'inhibit_sleep' state if we want to bypass it.
-      // For this Universal version, we use the board's class logic.
-  }
 }
