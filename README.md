@@ -1,3 +1,54 @@
+# 🛰 ESP32-C3 Super Mini Repeater Build Guide
+
+This guide describes how to build a MeshCore repeater using the compact **ESP32-C3 Super Mini** board, an **SX1262 (RA62)** LoRa module, and an optional **DS3231 RTC** for precise timekeeping.
+
+## 🛠 Hardware Requirements
+- **ESP32-C3 Super Mini**
+- **SX1262 LoRa Module** (e.g., Ebyte E22 or RA62)
+- **DS3231 RTC Module** (optional, for offline timekeeping)
+- **TP4056 Charging Module**
+- **3.7V Li-Po or Li-ion Battery**
+- **LoRa Antenna** (appropriate for your frequency, e.g., 868MHz)
+
+## 📌 Pinout & Wiring
+
+### 1. ESP32-C3 to SX1262 (LoRa)
+| SX1262 Pin | ESP32-C3 Pin | Description |
+|------------|--------------|-------------|
+| VCC        | 3.3V         | Power (3.3V) |
+| GND        | GND          | Ground |
+| NSS        | GPIO 8       | SPI Chip Select |
+| SCK        | GPIO 10      | SPI Clock |
+| MOSI       | GPIO 7       | SPI MOSI |
+| MISO       | GPIO 6       | SPI MISO |
+| DIO1       | GPIO 3       | Interrupt |
+| BUSY       | GPIO 4       | Busy Signal |
+| RESET      | GPIO 5       | Reset |
+
+### 2. ESP32-C3 to DS3231 (RTC)
+*Note: Make sure to use the I2C pins defined in the configuration (GPIO 1 & 2).*
+
+| DS3231 Pin | ESP32-C3 Pin | Description |
+|------------|--------------|-------------|
+| VCC        | 3.3V         | Power (3.3V) |
+| GND        | GND          | Ground |
+| SDA        | GPIO 1       | I2C Data |
+| SCL        | GPIO 2       | I2C Clock |
+
+### 3. Power Supply (TP4056)
+- **TP4056 B+ / B-**: Connect to the Battery terminals.
+- **TP4056 OUT+**: Connect to ESP32-C3 **5V (VBUS)** pin.
+- **TP4056 OUT-**: Connect to ESP32-C3 **GND**.
+
+---
+
+## ⚡ Assembly Tips
+1. **Antenna**: NEVER power on the LoRa module without an antenna connected. It can damage the chip.
+2. **I2C Pull-ups**: The DS3231 module usually has built-in pull-up resistors. If you are using raw chips, add 4.7kΩ resistors between SDA/SCL and 3.3V.
+3. **Battery**: A 18650 cell or a flat Li-Po battery works great for long-term repeater use.
+
+---
+
 ## About MeshCore
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.

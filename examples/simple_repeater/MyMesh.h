@@ -98,6 +98,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RegionEntry* load_stack[8];
   RegionEntry* recv_pkt_region;
   TransportKey default_scope;
+  mesh::GroupChannel periodic_channel;
+  unsigned long next_periodic_msg;
+  uint32_t periodic_msg_interval;
+  int8_t  periodic_msg_hour;
+  int8_t  last_sent_hour;
+  char    periodic_msg_text[64];
+  char    periodic_msg_chan_name[32];
   RateLimiter discover_limiter, anon_limiter;
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
@@ -200,6 +207,7 @@ public:
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
   void updateAdvertTimer() override;
   void updateFloodAdvertTimer() override;
+  void updatePeriodicMsgTimer();
 
   void setLoggingOn(bool enable) override { _logging = enable; }
 
@@ -225,6 +233,9 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
+
+  void savePeriodicPrefs();
+  void loadPeriodicPrefs();
 
 #if defined(WITH_BRIDGE)
   void setBridgeState(bool enable) override {

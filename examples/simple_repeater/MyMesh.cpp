@@ -60,6 +60,8 @@
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
+static const uint8_t PUBLIC_PSK[] = { 0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a, 0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72 };
+
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
   // find existing neighbour, else use least recently updated
@@ -922,6 +924,17 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   pending_discover_until = 0;
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
+
+  memset(periodic_channel.secret, 0, sizeof(periodic_channel.secret));
+  memcpy(periodic_channel.secret, PUBLIC_PSK, 16);
+  mesh::Utils::sha256(periodic_channel.hash, sizeof(periodic_channel.hash), periodic_channel.secret, 16);
+
+  periodic_msg_interval = 0;
+  periodic_msg_hour = -1;
+  last_sent_hour = -1;
+  next_periodic_msg = 0;
+  strcpy(periodic_msg_text, "Repeater is online");
+  strcpy(periodic_msg_chan_name, "Public");
 }
 
 void MyMesh::begin(FILESYSTEM *fs) {
@@ -962,12 +975,15 @@ void MyMesh::begin(FILESYSTEM *fs) {
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 
+  loadPeriodicPrefs();
+
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
 
   updateAdvertTimer();
   updateFloodAdvertTimer();
+  updatePeriodicMsgTimer();
 
   board.setAdcMultiplier(_prefs.adc_multiplier);
 
@@ -1036,6 +1052,54 @@ void MyMesh::updateFloodAdvertTimer() {
     next_flood_advert = futureMillis(((uint32_t)_prefs.flood_advert_interval) * 60 * 60 * 1000);
   } else {
     next_flood_advert = 0; // stop the timer
+  }
+}
+
+void MyMesh::updatePeriodicMsgTimer() {
+  if (periodic_msg_interval > 0) {
+    next_periodic_msg = futureMillis(periodic_msg_interval * 1000);
+  } else {
+    next_periodic_msg = 0;
+  }
+}
+
+void MyMesh::savePeriodicPrefs() {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove("/per_prefs");
+  File f = _fs->open("/per_prefs", FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  File f = _fs->open("/per_prefs", "w");
+#else
+  File f = _fs->open("/per_prefs", "w", true);
+#endif
+  if (f) {
+    f.write((uint8_t*)&periodic_msg_interval, 4);
+    f.write((uint8_t*)&periodic_msg_hour, 1);
+    f.write((uint8_t*)periodic_msg_text, 64);
+    f.write((uint8_t*)periodic_msg_chan_name, 32);
+    f.write((uint8_t*)periodic_channel.secret, 16);
+    f.close();
+  }
+}
+
+void MyMesh::loadPeriodicPrefs() {
+  if (_fs->exists("/per_prefs")) {
+#if defined(RP2040_PLATFORM)
+    File f = _fs->open("/per_prefs", "r");
+#else
+    File f = _fs->open("/per_prefs");
+#endif
+    if (f) {
+      f.read((uint8_t*)&periodic_msg_interval, 4);
+      f.read((uint8_t*)&periodic_msg_hour, 1);
+      f.read((uint8_t*)periodic_msg_text, 64);
+      f.read((uint8_t*)periodic_msg_chan_name, 32);
+      f.read((uint8_t*)periodic_channel.secret, 16);
+      f.close();
+
+      // update channel hash from secret
+      mesh::Utils::sha256(periodic_channel.hash, sizeof(periodic_channel.hash), periodic_channel.secret, 16);
+    }
   }
 }
 
@@ -1257,6 +1321,43 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+  } else if (memcmp(command, "periodic ", 9) == 0) {
+    char* sub = &command[9];
+    if (memcmp(sub, "interval ", 9) == 0) {
+      periodic_msg_interval = atoi(sub + 9);
+      updatePeriodicMsgTimer();
+      savePeriodicPrefs();
+      sprintf(reply, "OK - periodic interval set to %d s", periodic_msg_interval);
+    } else if (memcmp(sub, "hour ", 5) == 0) {
+      periodic_msg_hour = atoi(sub + 5);
+      savePeriodicPrefs();
+      sprintf(reply, "OK - periodic hour set to %02d:00", periodic_msg_hour);
+    } else if (memcmp(sub, "text ", 5) == 0) {
+      StrHelper::strncpy(periodic_msg_text, sub + 5, sizeof(periodic_msg_text));
+      savePeriodicPrefs();
+      sprintf(reply, "OK - periodic text set to: %s", periodic_msg_text);
+    } else if (memcmp(sub, "chan ", 5) == 0) {
+      StrHelper::strncpy(periodic_msg_chan_name, sub + 5, sizeof(periodic_msg_chan_name));
+      if (strcmp(periodic_msg_chan_name, "Public") == 0) {
+        memcpy(periodic_channel.secret, PUBLIC_PSK, 16);
+        mesh::Utils::sha256(periodic_channel.hash, sizeof(periodic_channel.hash), periodic_channel.secret, 16);
+      }
+      savePeriodicPrefs();
+      sprintf(reply, "OK - channel name set to %s", periodic_msg_chan_name);
+    } else if (memcmp(sub, "key ", 4) == 0) {
+      if (mesh::Utils::fromHex(periodic_channel.secret, 16, sub + 4)) {
+        mesh::Utils::sha256(periodic_channel.hash, sizeof(periodic_channel.hash), periodic_channel.secret, 16);
+        savePeriodicPrefs();
+        strcpy(reply, "OK - channel secret key set");
+      } else {
+        strcpy(reply, "Err - bad hex key (must be 32 chars)");
+      }
+    } else {
+      periodic_msg_interval = atoi(sub);
+      updatePeriodicMsgTimer();
+      savePeriodicPrefs();
+      sprintf(reply, "OK - periodic interval set to %d s", periodic_msg_interval);
+    }
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1281,6 +1382,38 @@ void MyMesh::loop() {
     if (pkt) sendZeroHop(pkt);
 
     updateAdvertTimer(); // schedule next local advert
+  }
+
+  bool time_to_send = false;
+  if (next_periodic_msg && millisHasNowPassed(next_periodic_msg)) {
+    time_to_send = true;
+    updatePeriodicMsgTimer();
+  }
+  if (periodic_msg_hour >= 0 && periodic_msg_hour <= 23) {
+    uint32_t now_secs = getRTCClock()->getCurrentTime();
+    DateTime now_dt = DateTime(now_secs);
+    if (now_dt.hour() == periodic_msg_hour && last_sent_hour != (int8_t)now_dt.hour()) {
+      time_to_send = true;
+      last_sent_hour = now_dt.hour();
+    } else if (now_dt.hour() != periodic_msg_hour) {
+      last_sent_hour = -1;
+    }
+  }
+
+  if (time_to_send) {
+    uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+
+    uint8_t temp[128];
+    memcpy(temp, &timestamp, 4);
+    temp[4] = 0; // TXT_TYPE_PLAIN
+
+    snprintf((char *)&temp[5], sizeof(temp) - 5, "%s: %s", _prefs.node_name, periodic_msg_text);
+    int content_len = strlen((char *)&temp[5]);
+
+    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, periodic_channel, temp, 5 + content_len);
+    if (pkt) {
+      sendFloodScoped(default_scope, pkt, 0, _prefs.path_hash_mode + 1);
+    }
   }
 
   if (set_radio_at && millisHasNowPassed(set_radio_at)) { // apply pending (temporary) radio params
