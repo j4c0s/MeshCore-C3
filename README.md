@@ -46,6 +46,21 @@ This guide describes how to build a MeshCore repeater using the compact **ESP32-
 1. **Antenna**: NEVER power on the LoRa module without an antenna connected. It can damage the chip.
 2. **I2C Pull-ups**: The DS3231 module usually has built-in pull-up resistors. If you are using raw chips, add 4.7kΩ resistors between SDA/SCL and 3.3V.
 3. **Battery**: A 18650 cell or a flat Li-Po battery works great for long-term repeater use.
+4. **Power Saving**: You can remove or cut the PowerLED on the ESP32-C3 and the LED on the RTC module to save approximately 2mA of current. An idle current of ~7.5mA can be achieved with `powersaving on` enabled in the CLI.
+
+---
+
+## 📢 Periodic Message Configuration
+
+The `simple_repeater` example supports periodic text messages that can be sent to a specific channel. These settings are persisted to the device's filesystem.
+
+**CLI Commands:**
+- `periodic <interval_seconds>`: Set the interval in seconds between messages.
+- `periodic interval <seconds>`: Same as above.
+- `periodic hour <0-23>`: Set a specific hour (UTC) to send a daily message.
+- `periodic text <message>`: Set the text content of the message.
+- `periodic chan <name>`: Set the channel name (e.g., `Public`).
+- `periodic key <hex_key>`: Set the 32-character hex secret key for the channel.
 
 ---
 
