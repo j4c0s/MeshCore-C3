@@ -17,25 +17,33 @@ This guide describes how to build a MeshCore repeater using the compact **ESP32-
 |------------|--------------|-------------|
 | VCC        | 3.3V         | Power (3.3V) |
 | GND        | GND          | Ground |
-| NSS        | GPIO 8       | SPI Chip Select |
-| SCK        | GPIO 10      | SPI Clock |
-| MOSI       | GPIO 7       | SPI MOSI |
-| MISO       | GPIO 6       | SPI MISO |
-| DIO1       | GPIO 3       | Interrupt |
-| BUSY       | GPIO 4       | Busy Signal |
-| RESET      | GPIO 5       | Reset |
+| NSS        | GPIO 10      | SPI Chip Select |
+| SCK        | GPIO 2       | SPI Clock |
+| MOSI       | GPIO 4       | SPI MOSI |
+| MISO       | GPIO 3       | SPI MISO |
+| DIO1       | GPIO 5       | Interrupt |
+| BUSY       | GPIO 6       | Busy Signal |
+| RESET      | GPIO 7       | Reset |
 
-### 2. ESP32-C3 to DS3231 (RTC)
-*Note: Make sure to use the I2C pins defined in the configuration (GPIO 1 & 2).*
+### 2. ESP32-C3 to Sensors & RTC (I2C)
+*Note: Using the I2C pins defined in the configuration (GPIO 8 & 9).*
 
-| DS3231 Pin | ESP32-C3 Pin | Description |
+| Sensor Pin | ESP32-C3 Pin | Description |
 |------------|--------------|-------------|
 | VCC        | 3.3V         | Power (3.3V) |
 | GND        | GND          | Ground |
-| SDA        | GPIO 1       | I2C Data |
-| SCL        | GPIO 2       | I2C Clock |
+| SDA        | GPIO 8       | I2C Data |
+| SCL        | GPIO 9       | I2C Clock |
 
-### 3. Power Supply (TP4056)
+### 3. ESP32-C3 to GPS
+| GPS Pin    | ESP32-C3 Pin | Description |
+|------------|--------------|-------------|
+| VCC        | 3.3V         | Power (3.3V) |
+| GND        | GND          | Ground |
+| TX         | GPIO 20      | UART TX (GPS) -> MCU RX |
+| RX         | GPIO 21      | UART RX (GPS) <- MCU TX |
+
+### 4. Power Supply (TP4056)
 - **TP4056 B+ / B-**: Connect to the Battery terminals.
 - **TP4056 OUT+**: Connect to ESP32-C3 **5V (VBUS)** pin.
 - **TP4056 OUT-**: Connect to ESP32-C3 **GND**.
@@ -44,8 +52,23 @@ This guide describes how to build a MeshCore repeater using the compact **ESP32-
 
 ## ⚡ Assembly Tips
 1. **Antenna**: NEVER power on the LoRa module without an antenna connected. It can damage the chip.
-2. **I2C Pull-ups**: The DS3231 module usually has built-in pull-up resistors. If you are using raw chips, add 4.7kΩ resistors between SDA/SCL and 3.3V.
+2. **I2C Pull-ups**: Most sensor modules have built-in pull-up resistors. If you are using raw chips, add 4.7kΩ resistors between SDA/SCL and 3.3V.
 3. **Battery**: A 18650 cell or a flat Li-Po battery works great for long-term repeater use.
+
+## 📢 Periodic Message Configuration
+The repeater can be configured to send periodic status or announcement messages to a specific mesh channel. These settings are managed via the `periodic` CLI command:
+
+- `periodic interval <seconds>`: Set the interval between messages in seconds.
+- `periodic hour <0-23>`: Set a specific hour of the day (UTC) to send the message.
+- `periodic text <message>`: Set the text of the announcement.
+- `periodic chan <name>`: Set the channel name (e.g., `Public`).
+- `periodic key <hex_key>`: Set the 16-byte (32 hex chars) secret key for the channel.
+
+Example:
+```bash
+periodic interval 3600
+periodic text "Repeater Jaco-Sensor is online"
+```
 
 ---
 
